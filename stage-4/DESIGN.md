@@ -1,51 +1,32 @@
-# Tablekeeper Stage 3 Design
+# Tablekeeper Stage 4 Design
 
 ## Architecture
 Go 1.21+ with stdlib, SQLite with WAL, bcrypt
 
-## New in Stage 3
+## New in Stage 4
 
-### 1. Availability Explanations
-- GET /availability with explain=true returns rule analysis
-- Rules: capacity, no_overlap
-- Every table appears once in fixture order
+### 1. Seating Replans
+- POST /restaurants/{id}/replans - create seating plan
+- POST /restaurants/{id}/replans/{plan_id}/apply - apply plan
+- New closures table tracks applied closures
+- Plans stored temporarily until applied or invalidated
+- Restaurant revision increments on each successful plan apply
 
-### 2. Reservation History
-- New endpoint: GET /reservations/{reference}/history
-- New endpoint: GET /reservations/{reference}/decision
-- Track changes with seq, at, event, revision, accepted_terms
+### 2. Series Amendments
+- POST /series/{series_id}/amend - bulk amend recurring reservations
+- Amend from specific index onward
+- Check cutoff, validate against new date's policy
 
-### 3. Booking Policies
-- Restaurants have manager_user_ids
-- POST /restaurants/{id}/policies to publish (requires idempotency)
-- GET /restaurants/{id}/policies to list
-- Policy selection by effective_from and policy_version
-
-### 4. Reservation Terms
-- All reservation responses include revision and accepted_terms
-- PATCH accepts expected_revision for optimistic locking
-- Cancel checks cutoff against current start
-
-### 5. Recurring Reservations
-- POST /series to create recurring bookings
-- GET /series/{series_id} to view
-- Exception handling for individual occurrences
-
-### 6. Database Schema Additions
-- policies table: restaurant_id, effective_from, slot_minutes, duration, cutoff, opening_hours, capacities, policy_version
-- reservation_history: reference, seq, at, event, revision, accepted_terms JSON
-- series table: series_id, anchor_reference, count, interval_weeks, revision
-- series_occurrences: series_id, index, reference, exception
+### 3. Database Schema Additions
+- closures table: restaurant_id, table_id, from, to, plan_id
+- plans table: plan_id, restaurant_id, closure JSON, assignments JSON, restaurant_revision, applied
+- series revision tracking for amendments
 
 ## Work Items
-1. [ ] Update availability with explain parameter
-2. [ ] Add history endpoint
-3. [ ] Add decision endpoint
-4. [ ] Add manager_user_ids to restaurants
-5. [ ] Add policies endpoint (POST/GET)
-6. [ ] Update reservation responses with revision/accepted_terms
-7. [ ] Add expected_revision to PATCH
-8. [ ] Add recurring reservations (POST/GET series)
-9. [ ] Update combined table history
-10. [ ] Test export/import compatibility
-11. [ ] Test locally
+1. [ ] Add replans endpoint
+2. [ ] Add apply plan endpoint
+3. [ ] Track closures in availability
+4. [ ] Add series amend endpoint
+5. [ ] Update history for reassignments
+6. [ ] Handle export/import compatibility
+7. [ ] Build and test
