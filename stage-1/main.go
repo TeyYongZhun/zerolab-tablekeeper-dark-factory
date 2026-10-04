@@ -184,6 +184,9 @@ var emailRe = regexp.MustCompile(`^[^@\s]+@[^@\s]+$`)
 
 func (s *server) signup(w http.ResponseWriter, r *http.Request) {
 	f, _, ae := readObject(r)
+	if ae == nil {
+		ae = requireStrings(f, "email", "password", "display_name")
+	}
 	if ae != nil {
 		writeErr(w, ae)
 		return
@@ -247,6 +250,9 @@ func (s *server) signup(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	f, _, ae := readObject(r)
+	if ae == nil {
+		ae = requireStrings(f, "email", "password")
+	}
 	if ae != nil {
 		writeErr(w, ae)
 		return
@@ -346,10 +352,10 @@ func (rest *restaurant) closesAt(wall time.Time, closeMin int) time.Time {
 
 func (rest *restaurant) duration() time.Duration { return time.Duration(rest.Duration) * time.Minute }
 
-func overlapExists(q querier, tableID string, start, end int64, excludeID string) (bool, error) {
+func overlapExists(q querier, restID, tableID string, start, end int64, excludeID string) (bool, error) {
 	var one int
-	err := q.QueryRow(`SELECT 1 FROM reservations WHERE table_id=? AND status='confirmed' AND id<>? AND starts_at<? AND ends_at>? LIMIT 1`,
-		tableID, excludeID, end, start).Scan(&one)
+	err := q.QueryRow(`SELECT 1 FROM reservations WHERE restaurant_id=? AND table_id=? AND status='confirmed' AND id<>? AND starts_at<? AND ends_at>? LIMIT 1`,
+		restID, tableID, excludeID, end, start).Scan(&one)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -408,7 +414,7 @@ func (s *server) availability(w http.ResponseWriter, r *http.Request) {
 				if t.Capacity < party {
 					continue
 				}
-				busy, err := overlapExists(s.db, t.ID, start.Unix(), end.Unix(), "")
+				busy, err := overlapExists(s.db, rest.ID, t.ID, start.Unix(), end.Unix(), "")
 				if err != nil {
 					fail(w, err)
 					return
@@ -619,7 +625,7 @@ func (s *server) createReservation(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, ae)
 		return
 	}
-	busy, err := overlapExists(tx, tid, start.Unix(), end.Unix(), "")
+	busy, err := overlapExists(tx, rid, tid, start.Unix(), end.Unix(), "")
 	if err != nil {
 		fail(w, err)
 		return
@@ -867,7 +873,7 @@ func (s *server) patchReservation(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, ae)
 		return
 	}
-	busy, err := overlapExists(tx, in.TableID, start.Unix(), end.Unix(), v.ID)
+	busy, err := overlapExists(tx, v.RestID, in.TableID, start.Unix(), end.Unix(), v.ID)
 	if err != nil {
 		fail(w, err)
 		return
@@ -1010,7 +1016,7 @@ func (s *server) moves(w http.ResponseWriter, r *http.Request) {
 		v.TableID, v.Party, v.Start, v.End = res[i].in.TableID, res[i].in.Party, res[i].start.Unix(), res[i].end.Unix()
 	}
 	for i, v := range vs {
-		busy, err := overlapExists(tx, res[i].in.TableID, v.Start, v.End, v.ID)
+		busy, err := overlapExists(tx, v.RestID, res[i].in.TableID, v.Start, v.End, v.ID)
 		if err != nil {
 			fail(w, err)
 			return
@@ -1176,4 +1182,19 @@ func main() {
 	}
 	log.Printf("listening on :%s", port)
 	log.Fatal(hs.ListenAndServe())
+}
+
+// requireStrings returns 400 malformed_request when a present field is not a
+// JSON string (a wrong type is a malformed request; missing/empty is a
+// validation failure handled by the caller).
+func requireStrings(f map[string]json.RawMessage, names ...string) *apiErr {
+	for _, n := range names {
+		if raw, ok := f[n]; ok {
+			var s string
+			if json.Unmarshal(raw, &s) != nil {
+				return errf(400, "malformed_request", n+" must be a string")
+			}
+		}
+	}
+	return nil
 }

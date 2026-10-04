@@ -237,3 +237,24 @@ func TestNoDoubleBookingConcurrent(t *testing.T) {
 		t.Fatalf("expected exactly one booking, got %v", codes)
 	}
 }
+
+func TestResetRegressions(t *testing.T) {
+	e := newEnv(t)
+	two := `{"restaurants":[
+{"id":"r_a","name":"A","timezone":"Europe/Berlin","slot_minutes":30,"reservation_duration_minutes":90,"cancellation_cutoff_minutes":0,"opening_hours":[{"weekday":"thu","opens":"18:00","closes":"23:00"}],"tables":[{"id":"t_1","label":"1","capacity":2}]},
+{"id":"r_b","name":"B","timezone":"America/New_York","slot_minutes":30,"reservation_duration_minutes":90,"cancellation_cutoff_minutes":0,"opening_hours":[{"weekday":"thu","opens":"18:00","closes":"23:00"}],"tables":[{"id":"t_1","label":"1","capacity":2}]}]}`
+	for i := 0; i < 2; i++ {
+		if c, m := e.do("POST", "/_test/reset", "", "", two); c != 204 {
+			t.Fatalf("same table id in two restaurants: %d %v", c, m)
+		}
+	}
+	for _, ref := range []string{"x/lower01", "TOO-LONG-WITH-DASH", "abc123", "SHORT"} {
+		fx := strings.Replace(fixtureJSON, `"ABC123"`, `"`+ref+`"`, 1)
+		if c, m := e.do("POST", "/_test/reset", "", "", fx); c != 422 || code(m) != "validation_failed" {
+			t.Fatalf("reference %q: %d %v", ref, c, m)
+		}
+	}
+	if c, m := e.do("POST", "/auth/signup", "", "", `{"email":5,"password":"password123","display_name":"x"}`); c != 400 || code(m) != "malformed_request" {
+		t.Fatalf("wrong type email: %d %v", c, m)
+	}
+}

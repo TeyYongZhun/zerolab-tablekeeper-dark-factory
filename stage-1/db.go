@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"regexp"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -36,24 +37,26 @@ CREATE TABLE IF NOT EXISTS opening_hours (
     closes TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS tables (
-    id TEXT PRIMARY KEY,
+    id TEXT NOT NULL,
     restaurant_id TEXT NOT NULL REFERENCES restaurants(id),
     label TEXT NOT NULL,
-    capacity INTEGER NOT NULL
+    capacity INTEGER NOT NULL,
+    PRIMARY KEY (restaurant_id, id)
 );
 CREATE TABLE IF NOT EXISTS reservations (
     id TEXT PRIMARY KEY,
     reference TEXT UNIQUE NOT NULL,
     user_id TEXT NOT NULL REFERENCES users(id),
     restaurant_id TEXT NOT NULL REFERENCES restaurants(id),
-    table_id TEXT NOT NULL REFERENCES tables(id),
+    table_id TEXT NOT NULL,
     party_size INTEGER NOT NULL,
     status TEXT NOT NULL DEFAULT 'confirmed',
     starts_at INTEGER NOT NULL,
     ends_at INTEGER NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (restaurant_id, table_id) REFERENCES tables(restaurant_id, id)
 );
-CREATE INDEX IF NOT EXISTS idx_reservations_table_time ON reservations(table_id, starts_at, ends_at);
+CREATE INDEX IF NOT EXISTS idx_reservations_table_time ON reservations(restaurant_id, table_id, starts_at, ends_at);
 CREATE INDEX IF NOT EXISTS idx_reservations_user ON reservations(user_id);
 CREATE TABLE IF NOT EXISTS tokens (
     token TEXT PRIMARY KEY,
@@ -291,7 +294,7 @@ func applyFixture(tx querier, fx *fixture) error {
 			if _, err := tx.Exec(`INSERT INTO tables(id,restaurant_id,label,capacity) VALUES(?,?,?,?)`, t.ID, r.ID, t.Label, t.Capacity); err != nil {
 				return invalid("table %q rejected: %v", t.ID, err)
 			}
-			tableOwner[t.ID] = r.ID
+			tableOwner[r.ID+"/"+t.ID] = r.ID
 		}
 	}
 	for _, rv := range fx.Reservations {
@@ -325,6 +328,9 @@ func seedReservation(tx querier, rv fixtureReservation, tableOwner map[string]st
 		}
 		rv.Reference = ref
 	}
+	if !refRe.MatchString(rv.Reference) {
+		return invalid("reservation %q reference must be 6-12 characters of A-Z0-9", rv.ID)
+	}
 	if rv.Status == "" {
 		rv.Status = "confirmed"
 	}
@@ -334,7 +340,7 @@ func seedReservation(tx querier, rv fixtureReservation, tableOwner map[string]st
 	if rv.PartySize < 1 {
 		return invalid("reservation %q has invalid party_size", rv.ID)
 	}
-	if tableOwner[rv.TableID] != rv.RestaurantID {
+	if tableOwner[rv.RestaurantID+"/"+rv.TableID] != rv.RestaurantID {
 		return invalid("reservation %q table does not belong to restaurant", rv.ID)
 	}
 	rest, err := loadRestaurant(tx, rv.RestaurantID)
@@ -603,3 +609,5 @@ func importState(tx querier, s *stateDoc) error {
 	}
 	return nil
 }
+
+var refRe = regexp.MustCompile(`^[A-Z0-9]{6,12}$`)
