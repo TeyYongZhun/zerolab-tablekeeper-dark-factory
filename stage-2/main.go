@@ -314,6 +314,10 @@ func (s *server) getRestaurant(w http.ResponseWriter, r *http.Request) {
 	if hours == nil {
 		hours = []openHours{}
 	}
+	combos := rest.Combos
+	if combos == nil {
+		combos = [][]string{}
+	}
 	tables := rest.Tables
 	if tables == nil {
 		tables = []tableRow{}
@@ -322,7 +326,7 @@ func (s *server) getRestaurant(w http.ResponseWriter, r *http.Request) {
 		"id": rest.ID, "name": rest.Name, "timezone": rest.Timezone,
 		"slot_minutes": rest.Slot, "reservation_duration_minutes": rest.Duration,
 		"cancellation_cutoff_minutes": rest.Cutoff,
-		"opening_hours":               hours, "tables": tables,
+		"opening_hours":               hours, "tables": tables, "combinable": combos,
 	})
 }
 
@@ -352,10 +356,16 @@ func (rest *restaurant) closesAt(wall time.Time, closeMin int) time.Time {
 
 func (rest *restaurant) duration() time.Duration { return time.Duration(rest.Duration) * time.Minute }
 
-func overlapExists(q querier, restID, tableID string, start, end int64, excludeID string) (bool, error) {
+func overlapExists(q querier, restID string, tableIDs []string, start, end int64, excludeID string) (bool, error) {
+	ph := strings.TrimSuffix(strings.Repeat("?,", len(tableIDs)), ",")
+	args := []any{restID, excludeID, end, start}
+	for _, t := range tableIDs {
+		args = append(args, t)
+	}
 	var one int
-	err := q.QueryRow(`SELECT 1 FROM reservations WHERE restaurant_id=? AND table_id=? AND status='confirmed' AND id<>? AND starts_at<? AND ends_at>? LIMIT 1`,
-		restID, tableID, excludeID, end, start).Scan(&one)
+	err := q.QueryRow(`SELECT 1 FROM reservations r JOIN reservation_tables rt ON rt.reservation_id=r.id
+		WHERE r.restaurant_id=? AND r.status='confirmed' AND r.id<>? AND r.starts_at<? AND r.ends_at>?
+		AND rt.table_id IN (`+ph+`) LIMIT 1`, args...).Scan(&one)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -410,22 +420,30 @@ func (s *server) availability(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			ids := []string{}
+			options := []map[string]any{}
+			free := map[string]bool{}
 			for _, t := range rest.Tables {
-				if t.Capacity < party {
-					continue
-				}
-				busy, err := overlapExists(s.db, rest.ID, t.ID, start.Unix(), end.Unix(), "")
+				busy, err := overlapExists(s.db, rest.ID, []string{t.ID}, start.Unix(), end.Unix(), "")
 				if err != nil {
 					fail(w, err)
 					return
 				}
-				if !busy {
+				free[t.ID] = !busy
+				if !busy && t.Capacity >= party {
 					ids = append(ids, t.ID)
+					options = append(options, map[string]any{"table_ids": []string{t.ID}, "capacity": t.Capacity})
 				}
+			}
+			for _, c := range rest.Combos {
+				ta, tb := findTable(rest, c[0]), findTable(rest, c[1])
+				if ta == nil || tb == nil || !free[c[0]] || !free[c[1]] || ta.Capacity+tb.Capacity < party {
+					continue
+				}
+				options = append(options, map[string]any{"table_ids": []string{c[0], c[1]}, "capacity": ta.Capacity + tb.Capacity})
 			}
 			slots = append(slots, map[string]any{
 				"starts_at_local": fmtLocal(start, rest.Loc), "starts_at": fmtRFC(start, rest.Loc),
-				"available_table_ids": ids,
+				"available_table_ids": ids, "available_options": options,
 			})
 		}
 	}
@@ -435,27 +453,54 @@ func (s *server) availability(w http.ResponseWriter, r *http.Request) {
 // ---- reservations ----
 
 type reservation struct {
-	ID, Ref, UserID, RestID, TableID, Status, CreatedAt string
-	Party                                               int
-	Start, End                                          int64
+	ID, Ref, UserID, RestID, Status, CreatedAt string
+	TableIDs                                   []string
+	Party                                      int
+	Start, End                                 int64
 }
 
-const resCols = `id,reference,user_id,restaurant_id,table_id,party_size,status,starts_at,ends_at,created_at`
+const resCols = `id,reference,user_id,restaurant_id,party_size,status,starts_at,ends_at,created_at`
 
 func scanRes(sc interface{ Scan(...any) error }) (*reservation, error) {
 	v := &reservation{}
-	err := sc.Scan(&v.ID, &v.Ref, &v.UserID, &v.RestID, &v.TableID, &v.Party, &v.Status, &v.Start, &v.End, &v.CreatedAt)
+	err := sc.Scan(&v.ID, &v.Ref, &v.UserID, &v.RestID, &v.Party, &v.Status, &v.Start, &v.End, &v.CreatedAt)
 	return v, err
+}
+
+// fillTables loads the table set of each reservation. Callers must have
+// finished iterating any open rows first (single connection).
+func fillTables(q querier, list ...*reservation) error {
+	for _, v := range list {
+		rows, err := q.Query(`SELECT table_id FROM reservation_tables WHERE reservation_id=? ORDER BY position`, v.ID)
+		if err != nil {
+			return err
+		}
+		v.TableIDs = []string{}
+		for rows.Next() {
+			var t string
+			if err := rows.Scan(&t); err != nil {
+				rows.Close()
+				return err
+			}
+			v.TableIDs = append(v.TableIDs, t)
+		}
+		rows.Close()
+	}
+	return nil
 }
 
 func (v *reservation) json(loc *time.Location) map[string]any {
 	st := time.Unix(v.Start, 0)
-	return map[string]any{
-		"reservation_id": v.ID, "reference": v.Ref, "restaurant_id": v.RestID, "table_id": v.TableID,
+	m := map[string]any{
+		"reservation_id": v.ID, "reference": v.Ref, "restaurant_id": v.RestID, "table_ids": v.TableIDs,
 		"party_size": v.Party, "status": v.Status,
 		"starts_at_local": fmtLocal(st, loc), "starts_at": fmtRFC(st, loc),
 		"ends_at": fmtRFC(time.Unix(v.End, 0), loc), "created_at": v.CreatedAt,
 	}
+	if len(v.TableIDs) == 1 {
+		m["table_id"] = v.TableIDs[0]
+	}
+	return m
 }
 
 type locCache map[string]*restaurant
@@ -481,14 +526,14 @@ func (s *server) resJSON(q querier, v *reservation, c locCache) (map[string]any,
 
 // bookingInput holds the (possibly merged) values to validate.
 type bookingInput struct {
-	TableID    string
+	TableIDs   []string
 	StartLocal string
 	Party      int
 }
 
 // checkBooking validates a booking against the restaurant rules and returns the
-// absolute start/end times. The table must already belong to rest.
-func checkBooking(rest *restaurant, tbl *tableRow, in bookingInput) (time.Time, time.Time, *apiErr) {
+// absolute start/end times. capacity is the combined capacity of the table set.
+func checkBooking(rest *restaurant, capacity int, in bookingInput) (time.Time, time.Time, *apiErr) {
 	wall, ok := parseWall(in.StartLocal)
 	if !ok {
 		return time.Time{}, time.Time{}, invalid("starts_at_local must be YYYY-MM-DDTHH:MM")
@@ -513,7 +558,7 @@ func checkBooking(rest *restaurant, tbl *tableRow, in bookingInput) (time.Time, 
 	if end.After(rest.closesAt(wall, closeMin)) {
 		return time.Time{}, time.Time{}, outside
 	}
-	if in.Party > tbl.Capacity {
+	if in.Party > capacity {
 		return time.Time{}, time.Time{}, errf(422, "party_exceeds_capacity", "party size exceeds table capacity")
 	}
 	return start, end, nil
@@ -526,6 +571,64 @@ func findTable(rest *restaurant, id string) *tableRow {
 		}
 	}
 	return nil
+}
+
+// resolveTables checks that every table exists in the restaurant and that a
+// pair is a declared combination. It returns the canonical table order
+// (combinable order for pairs) and the combined capacity.
+func resolveTables(rest *restaurant, ids []string) ([]string, int, *apiErr) {
+	capacity := 0
+	for _, id := range ids {
+		t := findTable(rest, id)
+		if t == nil {
+			return nil, 0, errNotFound
+		}
+		capacity += t.Capacity
+	}
+	if len(ids) == 2 {
+		for _, c := range rest.Combos {
+			if len(c) == 2 && ((c[0] == ids[0] && c[1] == ids[1]) || (c[0] == ids[1] && c[1] == ids[0])) {
+				return []string{c[0], c[1]}, capacity, nil
+			}
+		}
+		return nil, 0, errf(422, "combination_not_allowed", "those tables cannot be combined")
+	}
+	return ids, capacity, nil
+}
+
+// parseTableSet reads table_id / table_ids. present is false when neither is sent.
+func parseTableSet(f map[string]json.RawMessage) ([]string, bool, *apiErr) {
+	rawOne, hasOne := f["table_id"]
+	rawMany, hasMany := f["table_ids"]
+	if hasOne && hasMany {
+		return nil, false, invalid("send either table_id or table_ids, not both")
+	}
+	var ids []string
+	switch {
+	case hasOne:
+		var s string
+		if json.Unmarshal(rawOne, &s) != nil || s == "" {
+			return nil, false, invalid("table_id must be a non-empty string")
+		}
+		ids = []string{s}
+	case hasMany:
+		if json.Unmarshal(rawMany, &ids) != nil || len(ids) < 1 {
+			return nil, false, invalid("table_ids must be a non-empty array of strings")
+		}
+		seen := map[string]bool{}
+		for _, id := range ids {
+			if id == "" || seen[id] {
+				return nil, false, invalid("table_ids must be distinct non-empty strings")
+			}
+			seen[id] = true
+		}
+		if len(ids) > 2 {
+			return nil, false, errf(422, "combination_not_allowed", "at most two tables can be combined")
+		}
+	default:
+		return nil, false, nil
+	}
+	return ids, true, nil
 }
 
 // idempotency: returns stored response when the key was seen.
@@ -593,7 +696,10 @@ func (s *server) createReservation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rid, _, ae1 := fieldString(f, "restaurant_id", true)
-	tid, _, ae2 := fieldString(f, "table_id", true)
+	tids, hasT, ae2 := parseTableSet(f)
+	if ae2 == nil && !hasT {
+		ae2 = invalid("table_id or table_ids is required")
+	}
 	startLocal, _, ae3 := fieldString(f, "starts_at_local", true)
 	party, _, ae4 := fieldInt(f, "party_size", true)
 	for _, e := range []*apiErr{ae1, ae2, ae3, ae4} {
@@ -615,17 +721,17 @@ func (s *server) createReservation(w http.ResponseWriter, r *http.Request) {
 		fail(w, err)
 		return
 	}
-	tbl := findTable(rest, tid)
-	if tbl == nil {
-		writeErr(w, errNotFound)
-		return
-	}
-	start, end, ae := checkBooking(rest, tbl, bookingInput{tid, startLocal, party})
+	tids, capacity, ae := resolveTables(rest, tids)
 	if ae != nil {
 		writeErr(w, ae)
 		return
 	}
-	busy, err := overlapExists(tx, rid, tid, start.Unix(), end.Unix(), "")
+	start, end, ae := checkBooking(rest, capacity, bookingInput{tids, startLocal, party})
+	if ae != nil {
+		writeErr(w, ae)
+		return
+	}
+	busy, err := overlapExists(tx, rid, tids, start.Unix(), end.Unix(), "")
 	if err != nil {
 		fail(w, err)
 		return
@@ -639,10 +745,9 @@ func (s *server) createReservation(w http.ResponseWriter, r *http.Request) {
 		fail(w, err)
 		return
 	}
-	v := &reservation{ID: newID("res_"), Ref: ref, UserID: uid, RestID: rid, TableID: tid, Party: party,
+	v := &reservation{ID: newID("res_"), Ref: ref, UserID: uid, RestID: rid, TableIDs: tids, Party: party,
 		Status: "confirmed", Start: start.Unix(), End: end.Unix(), CreatedAt: nowStamp()}
-	if _, err := tx.Exec(`INSERT INTO reservations(`+resCols+`) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-		v.ID, v.Ref, v.UserID, v.RestID, v.TableID, v.Party, v.Status, v.Start, v.End, v.CreatedAt); err != nil {
+	if err := insertReservation(tx, v.ID, v.Ref, v.UserID, v.RestID, v.TableIDs, v.Party, v.Status, v.Start, v.End, v.CreatedAt); err != nil {
 		fail(w, err)
 		return
 	}
@@ -685,6 +790,10 @@ func (s *server) listReservations(w http.ResponseWriter, r *http.Request) {
 		list = append(list, v)
 	}
 	rows.Close()
+	if err := fillTables(s.db, list...); err != nil {
+		fail(w, err)
+		return
+	}
 	c := locCache{}
 	out := []map[string]any{}
 	for _, v := range list {
@@ -704,6 +813,9 @@ func ownedReservation(q querier, uid, ref string) (*reservation, *apiErr) {
 		return nil, errNotFound
 	}
 	if err != nil {
+		return nil, errf(500, "internal_error", err.Error())
+	}
+	if err := fillTables(q, v); err != nil {
 		return nil, errf(500, "internal_error", err.Error())
 	}
 	return v, nil
@@ -779,7 +891,7 @@ func (s *server) cancelReservation(w http.ResponseWriter, r *http.Request) {
 
 // amendFields parses the optional amendment fields shared by PATCH and moves.
 type amendment struct {
-	TableID                      string
+	TableIDs                     []string
 	StartLocal                   string
 	Party                        int
 	hasTable, hasStart, hasParty bool
@@ -788,7 +900,7 @@ type amendment struct {
 func parseAmendment(f map[string]json.RawMessage) (*amendment, *apiErr) {
 	a := &amendment{}
 	var ae *apiErr
-	if a.TableID, a.hasTable, ae = fieldString(f, "table_id", false); ae != nil {
+	if a.TableIDs, a.hasTable, ae = parseTableSet(f); ae != nil {
 		return nil, ae
 	}
 	if a.StartLocal, a.hasStart, ae = fieldString(f, "starts_at_local", false); ae != nil {
@@ -808,9 +920,9 @@ func parseAmendment(f map[string]json.RawMessage) (*amendment, *apiErr) {
 // resolveAmend merges an amendment into a reservation and validates it,
 // returning the new values.
 func resolveAmend(q querier, rest *restaurant, v *reservation, a *amendment) (bookingInput, time.Time, time.Time, *apiErr) {
-	in := bookingInput{TableID: v.TableID, StartLocal: fmtLocal(time.Unix(v.Start, 0), rest.Loc), Party: v.Party}
+	in := bookingInput{TableIDs: v.TableIDs, StartLocal: fmtLocal(time.Unix(v.Start, 0), rest.Loc), Party: v.Party}
 	if a.hasTable {
-		in.TableID = a.TableID
+		in.TableIDs = a.TableIDs
 	}
 	if a.hasStart {
 		in.StartLocal = a.StartLocal
@@ -818,11 +930,12 @@ func resolveAmend(q querier, rest *restaurant, v *reservation, a *amendment) (bo
 	if a.hasParty {
 		in.Party = a.Party
 	}
-	tbl := findTable(rest, in.TableID)
-	if tbl == nil {
-		return in, time.Time{}, time.Time{}, errNotFound
+	ids, capacity, ae := resolveTables(rest, in.TableIDs)
+	if ae != nil {
+		return in, time.Time{}, time.Time{}, ae
 	}
-	start, end, ae := checkBooking(rest, tbl, in)
+	in.TableIDs = ids
+	start, end, ae := checkBooking(rest, capacity, in)
 	return in, start, end, ae
 }
 
@@ -873,7 +986,7 @@ func (s *server) patchReservation(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, ae)
 		return
 	}
-	busy, err := overlapExists(tx, v.RestID, in.TableID, start.Unix(), end.Unix(), v.ID)
+	busy, err := overlapExists(tx, v.RestID, in.TableIDs, start.Unix(), end.Unix(), v.ID)
 	if err != nil {
 		fail(w, err)
 		return
@@ -882,12 +995,16 @@ func (s *server) patchReservation(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, errf(409, "table_unavailable", "table is already booked for that time"))
 		return
 	}
-	if _, err := tx.Exec(`UPDATE reservations SET table_id=?,party_size=?,starts_at=?,ends_at=? WHERE id=?`,
-		in.TableID, in.Party, start.Unix(), end.Unix(), v.ID); err != nil {
+	if _, err := tx.Exec(`UPDATE reservations SET party_size=?,starts_at=?,ends_at=? WHERE id=?`,
+		in.Party, start.Unix(), end.Unix(), v.ID); err != nil {
 		fail(w, err)
 		return
 	}
-	v.TableID, v.Party, v.Start, v.End = in.TableID, in.Party, start.Unix(), end.Unix()
+	if err := setReservationTables(tx, v.ID, v.RestID, in.TableIDs); err != nil {
+		fail(w, err)
+		return
+	}
+	v.TableIDs, v.Party, v.Start, v.End = in.TableIDs, in.Party, start.Unix(), end.Unix()
 	if err := tx.Commit(); err != nil {
 		fail(w, err)
 		return
@@ -1008,15 +1125,19 @@ func (s *server) moves(w http.ResponseWriter, r *http.Request) {
 		res[i] = result{in, st, en}
 	}
 	for i, v := range vs {
-		if _, err := tx.Exec(`UPDATE reservations SET table_id=?,party_size=?,starts_at=?,ends_at=? WHERE id=?`,
-			res[i].in.TableID, res[i].in.Party, res[i].start.Unix(), res[i].end.Unix(), v.ID); err != nil {
+		if _, err := tx.Exec(`UPDATE reservations SET party_size=?,starts_at=?,ends_at=? WHERE id=?`,
+			res[i].in.Party, res[i].start.Unix(), res[i].end.Unix(), v.ID); err != nil {
 			fail(w, err)
 			return
 		}
-		v.TableID, v.Party, v.Start, v.End = res[i].in.TableID, res[i].in.Party, res[i].start.Unix(), res[i].end.Unix()
+		if err := setReservationTables(tx, v.ID, v.RestID, res[i].in.TableIDs); err != nil {
+			fail(w, err)
+			return
+		}
+		v.TableIDs, v.Party, v.Start, v.End = res[i].in.TableIDs, res[i].in.Party, res[i].start.Unix(), res[i].end.Unix()
 	}
 	for i, v := range vs {
-		busy, err := overlapExists(tx, v.RestID, res[i].in.TableID, v.Start, v.End, v.ID)
+		busy, err := overlapExists(tx, v.RestID, res[i].in.TableIDs, v.Start, v.End, v.ID)
 		if err != nil {
 			fail(w, err)
 			return
@@ -1153,6 +1274,7 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("POST /reservations/{reference}/cancel", s.cancelReservation)
 	mux.HandleFunc("PATCH /reservations/{reference}", s.patchReservation)
 	mux.HandleFunc("POST /reservation-moves", s.moves)
+	registerUI(mux)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, errNotFound)
 	})

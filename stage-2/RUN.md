@@ -20,3 +20,9 @@ curl http://localhost:8080/health
 ```
 
 Run the unit tests without Docker (needs Go 1.22+): `go test ./...`
+
+## Stage 2 additions
+
+- Browser UI (server-rendered shells, inline JS, no external assets): `/`, `/signup`, `/login`, `/lookup`.
+- Combined tables: restaurant fixtures accept `combinable` pairs; bookings accept `table_ids`.
+- `go test ./...` also runs the stage-2 tests (combined tables, stage-1 export import, UI routes).
