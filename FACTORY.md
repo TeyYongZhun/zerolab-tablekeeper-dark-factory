@@ -146,6 +146,29 @@ What the room log and history show that the factory did not do well:
 | **Submitted run, stages 1–4** | **$0.88** | **45%** of a 5-hour window in total (one reset before stage 4) | **1 h 44 min** (sum of the four stages) |
 | **Everything including the toy rehearsal** | **$0.99 of $25** | | |
 
+### Token usage in the submitted run
+
+Read from the seats' own records after the run: OpenCode's session database for the
+Architect and QA Lead, and Claude Code's session log for the Developer (00:41 → 03:15).
+
+| Seat | Model | Model calls | Input tokens | Output tokens |
+|---|---|---|---|---|
+| Architect | MiniMax-M2.5 | 91 | 2,746,010 | 26,051 |
+| QA Lead | MiniMax-M2.5 | 186 | 6,149,009 | 33,200 |
+| Developer | claude-sonnet-5-5 | 182 | 37,587,348, of which 37,246,741 (99%) were cache reads | 211,799 |
+| **Total** | | **459** | **46.5 M** | **0.27 M** |
+
+- **Input is over 99% of all tokens.** Every agent step re-sends its context, so reading, not
+  writing, drives cost.
+- **QA read more than twice as much as the Architect.** Reviewing means reading build output
+  and test logs; that is the price of independent verification.
+- **Prompt caching carried the Developer.** Almost all of its input was served from cache,
+  which is why a full four-stage build fit in under half of one Pro usage window. At API list
+  prices its usage would be roughly $10; on the Pro plan it cost nothing extra.
+- **Featherless billed less than the token count suggests.** At list price the two OpenCode
+  seats' tokens would cost about $2.70, but the account balance fell by $0.88 for the run. The
+  balance drop is the measured figure above; the token counts are volume.
+
 Band's agent card estimated the Developer's practice usage at about $0.43 at API prices; on
 the Pro plan it was not billed separately. The Claude percentages also include the operator's
 own Claude Code session running alongside, so they overstate the Developer's share.
