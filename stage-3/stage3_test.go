@@ -142,10 +142,10 @@ func TestSeries(t *testing.T) {
 	tok := login(t, e, "ada@example.com")
 	_, a := e.do("POST", "/reservations", tok, "a1", `{"restaurant_id":"r_anker","table_id":"t_2","starts_at_local":"2099-09-24T19:00","party_size":4}`)
 	ref := a["reference"].(string)
-	if c, _ := e.do("POST", "/series", tok, "", `{"anchor_reference":"`+ref+`","count":1,"interval_weeks":1}`); c != 422 {
+	if c, _ := e.do("POST", "/series", tok, "sk-a", `{"anchor_reference":"`+ref+`","count":1,"interval_weeks":1}`); c != 422 {
 		t.Fatalf("count 1: %d", c)
 	}
-	c, s := e.do("POST", "/series", tok, "", `{"anchor_reference":"`+ref+`","count":3,"interval_weeks":1}`)
+	c, s := e.do("POST", "/series", tok, "sk-b", `{"anchor_reference":"`+ref+`","count":3,"interval_weeks":1}`)
 	if c != 201 || s["revision"].(float64) != 1 {
 		t.Fatalf("series %d %v", c, s)
 	}
@@ -156,7 +156,16 @@ func TestSeries(t *testing.T) {
 	if got := occ[2].(map[string]any)["reservation"].(map[string]any)["starts_at_local"]; got != "2099-10-08T19:00" {
 		t.Fatalf("third occurrence %v", got)
 	}
-	if c, m := e.do("POST", "/series", tok, "", `{"anchor_reference":"`+ref+`","count":2,"interval_weeks":1}`); c != 409 || code(m) != "already_in_series" {
+	if c, rp := e.do("POST", "/series", tok, "sk-b", `{"anchor_reference":"`+ref+`","count":3,"interval_weeks":1}`); c != 200 || rp["series_id"] != s["series_id"] {
+		t.Fatalf("series replay %d %v", c, rp)
+	}
+	if c, m := e.do("POST", "/series", tok, "sk-b", `{"anchor_reference":"`+ref+`","count":4,"interval_weeks":1}`); c != 409 || code(m) != "idempotency_key_reuse" {
+		t.Fatalf("series key reuse %d %v", c, m)
+	}
+	if c, m := e.do("POST", "/series", tok, "", `{"anchor_reference":"`+ref+`","count":3,"interval_weeks":1}`); c != 400 || code(m) != "missing_idempotency_key" {
+		t.Fatalf("series without key %d %v", c, m)
+	}
+	if c, m := e.do("POST", "/series", tok, "sk-c", `{"anchor_reference":"`+ref+`","count":2,"interval_weeks":1}`); c != 409 || code(m) != "already_in_series" {
 		t.Fatalf("again %d %v", c, m)
 	}
 	sid := s["series_id"].(string)
@@ -171,6 +180,9 @@ func TestSeries(t *testing.T) {
 		t.Fatalf("series after changes %d %v", c, g)
 	}
 	other := login(t, e, "mgr@example.com")
+	if c, _ := e.do("GET", "/series/"+sid, "", "", ""); c != 404 {
+		t.Fatalf("series without token %d", c)
+	}
 	if c, _ := e.do("GET", "/series/"+sid, other, "", ""); c != 404 {
 		t.Fatalf("series leak %d", c)
 	}

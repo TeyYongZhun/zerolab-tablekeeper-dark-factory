@@ -273,7 +273,12 @@ func (s *server) createSeries(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, ae)
 		return
 	}
-	f, _, ae := readObject(r)
+	key, ae := idemKey(r)
+	if ae != nil {
+		writeErr(w, ae)
+		return
+	}
+	f, hash, ae := readObject(r)
 	if ae != nil {
 		writeErr(w, ae)
 		return
@@ -303,6 +308,15 @@ func (s *server) createSeries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
+	if resp, found, ae := idemLookup(tx, key, uid, "/series", hash); ae != nil {
+		writeErr(w, ae)
+		return
+	} else if found {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		io.WriteString(w, resp)
+		return
+	}
 	anchor, ae := ownedReservation(tx, uid, ref)
 	if ae != nil {
 		writeErr(w, ae)
@@ -385,6 +399,12 @@ func (s *server) createSeries(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, ae)
 		return
 	}
+	bj, _ := json.Marshal(body)
+	if _, err := tx.Exec(`INSERT INTO idempotency_keys(key,user_id,request_path,request_body_hash,response_body,created_at) VALUES(?,?,?,?,?,?)`,
+		key, uid, "/series", hash, string(bj), nowStamp()); err != nil {
+		fail(w, err)
+		return
+	}
 	if err := tx.Commit(); err != nil {
 		fail(w, err)
 		return
@@ -397,7 +417,7 @@ func (s *server) getSeries(w http.ResponseWriter, r *http.Request) {
 	defer s.mu.Unlock()
 	uid, ae := s.authUser(s.db, r)
 	if ae != nil {
-		writeErr(w, ae)
+		writeErr(w, errNotFound)
 		return
 	}
 	var owner string
