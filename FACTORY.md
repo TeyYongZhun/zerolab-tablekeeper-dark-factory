@@ -125,6 +125,12 @@ What the room log and history show that the factory did not do well:
 - **QA's stage-1 isolated-mode run timed out** on its 5-minute shell limit (first build of the
   test-runner image). The Architect's stage-1 report says so. The operator confirmed isolated
   mode with the harness afterwards; later dispatches gave the command a 20-minute limit.
+- **QA left the repository on a detached HEAD.** In stage 1 it checked out the reviewed
+  revision by hash, and every later commit landed on that detached line while the `main`
+  branch stayed at the first stage-1 commit. The history itself is linear and complete; before
+  pushing, the operator moved `main` to the final commit (a fast-forward, no history
+  rewritten). A reviewer should check out a revision in a separate worktree, or return to the
+  branch afterwards.
 - **Developer wrote all application code.** That is the design: Architect plans and
   coordinates, QA verifies. Work is shared by role, not by splitting the code.
 
