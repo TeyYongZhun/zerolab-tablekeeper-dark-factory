@@ -1,0 +1,1 @@
+band-sdk[opencode]>=4.0
