@@ -210,6 +210,7 @@ const indexJS = `
   var choice = null;     // currently chosen table set: {restId, restName, tableIds, startLocal, labels, labelMap}
   var pending = null;    // uncertain booking awaiting retry: {key, body, choice}
   var busy = false;
+  var attempt = null;    // {key, bodyStr}: the idempotency key follows the form contents
   var detailCache = {};
 
   function saveForm() { TK.set('tk_form', { restaurant: sel$.value, date: date$.value, party: party$.value }); }
@@ -307,6 +308,17 @@ const indexJS = `
   }
 
   function pick(det, ids, startLocal) {
+    attempt = null;
+    if (!TK.session()) {
+      clearPending();
+      choice = null;
+      TK.$('confirm').textContent = '';
+      TK.$('booking').textContent = '';
+      var ae = TK.el('p', { 'data-testid': 'auth-error', role: 'alert', 'class': 'error' }, 'Please log in to book a table. ');
+      ae.appendChild(TK.el('a', { href: '/login' }, 'Log in'));
+      TK.$('booking').appendChild(ae);
+      return;
+    }
     clearPending();
     TK.$('confirm').textContent = '';
     var labelMap = {};
@@ -350,6 +362,7 @@ const indexJS = `
 
   function markUncertain(key, body) {
     pending = { key: key, body: body, choice: choice };
+    attempt = { key: key, bodyStr: JSON.stringify(body) };
     TK.set('tk_pending', pending);
     showUncertain();
   }
@@ -365,7 +378,9 @@ const indexJS = `
       if (!/^[0-9]+$/.test(party) || parseInt(party, 10) < 1) { showError('Party size must be a whole number of at least 1.'); return; }
       if (!TK.session()) { showError('Please log in to book a table.'); return; }
       body = { restaurant_id: choice.restId, table_ids: choice.tableIds, starts_at_local: choice.startLocal, party_size: parseInt(party, 10) };
-      key = TK.uuid();
+      var bodyStr = JSON.stringify(body);
+      if (!attempt || attempt.bodyStr !== bodyStr) { attempt = { key: TK.uuid(), bodyStr: bodyStr }; }
+      key = attempt.key;
     }
     if (!TK.session()) { showError('Please log in to book a table.'); return; }
     busy = true;
@@ -397,7 +412,9 @@ const indexJS = `
   function success(res) {
     clearPending();
     var c = choice;
-    TK.$('booking').textContent = '';
+    clearMsg();
+    var pin = document.querySelector('[data-testid="booking-party-size"]');
+    if (pin) { pin.readOnly = false; }
     var labels = (res.table_ids || c.tableIds).map(function (id) { return c.labelMap[id] || id; });
     var box = TK.$('confirm');
     box.textContent = '';
@@ -412,7 +429,6 @@ const indexJS = `
     t.appendChild(TK.el('span', { 'data-testid': 'confirmation-tables' }, labels.join(' + ')));
     conf.appendChild(t);
     box.appendChild(conf);
-    choice = null;
     search();
   }
 
@@ -429,6 +445,7 @@ const indexJS = `
       var p = TK.get('tk_pending');
       if (p && p.key && p.body && p.choice) {
         pending = p;
+        attempt = { key: p.key, bodyStr: JSON.stringify(p.body) };
         choice = p.choice;
         renderBooking(String(p.body.party_size), true);
       }
