@@ -1,72 +1,51 @@
-# Tablekeeper Stage 2 Design
+# Tablekeeper Stage 3 Design
 
 ## Architecture
+Go 1.21+ with stdlib, SQLite with WAL, bcrypt
 
-**Language**: Go 1.21+
-**Framework**: Standard library (ServeMux)
-**Database**: SQLite with WAL mode for concurrency
-**Password hashing**: bcrypt
+## New in Stage 3
 
-## Stage 2 New Features
+### 1. Availability Explanations
+- GET /availability with explain=true returns rule analysis
+- Rules: capacity, no_overlap
+- Every table appears once in fixture order
 
-### 1. Combined Tables
-Restaurant fixture gains `combinable` field: array of pairs [[t1, t2], ...]
-- Pair capacity = sum of individual capacities
-- Only exactly 2 tables per pair (no 3+)
-- Not transitive
+### 2. Reservation History
+- New endpoint: GET /reservations/{reference}/history
+- New endpoint: GET /reservations/{reference}/decision
+- Track changes with seq, at, event, revision, accepted_terms
 
-### 2. Database Schema Changes
-Add `combinable` to restaurants table:
-```sql
-ALTER TABLE restaurants ADD COLUMN combinable TEXT;
-```
-(Stored as JSON array)
+### 3. Booking Policies
+- Restaurants have manager_user_ids
+- POST /restaurants/{id}/policies to publish (requires idempotency)
+- GET /restaurants/{id}/policies to list
+- Policy selection by effective_from and policy_version
 
-### 3. API Changes
+### 4. Reservation Terms
+- All reservation responses include revision and accepted_terms
+- PATCH accepts expected_revision for optimistic locking
+- Cancel checks cutoff against current start
 
-#### GET /availability
-Returns `available_options`:
-- Single tables (available_table_ids)
-- Combined pairs with capacity >= party_size
-- Order: singles first, then pairs in combinable order
+### 5. Recurring Reservations
+- POST /series to create recurring bookings
+- GET /series/{series_id} to view
+- Exception handling for individual occurrences
 
-#### POST /reservations
-Accepts:
-- `table_id` (string, single table - backward compatible)
-- `table_ids` (array, one or two tables - NEW)
-
-Validation:
-- Cannot send both table_id and table_ids
-- Max 2 tables in table_ids
-- Pair must be in restaurant's combinable
-- party_size <= combined capacity
-
-#### POST /reservation-moves
-Accepts `table_ids` per move
-
-### 4. Browser UI
-HTML routes: /, /signup, /login, /lookup
-
-Data-testid attributes for all required elements.
-
-Concurrent handling:
-- 409 response → booking-error + refresh
-- Lost response → booking-uncertain + retry with same key
-
-### 5. Export/Import
-- Accept stage-1 exports (no combinable field)
-- Preserve tokens, references, idempotency keys
-- Form state survives import
+### 6. Database Schema Additions
+- policies table: restaurant_id, effective_from, slot_minutes, duration, cutoff, opening_hours, capacities, policy_version
+- reservation_history: reference, seq, at, event, revision, accepted_terms JSON
+- series table: series_id, anchor_reference, count, interval_weeks, revision
+- series_occurrences: series_id, index, reference, exception
 
 ## Work Items
-
-1. [ ] Update database for combinable field
-2. [ ] Update GET /availability with available_options
-3. [ ] Update POST /reservations to accept table_ids
-4. [ ] Update PATCH /reservations
-5. [ ] Update POST /reservation-moves
-6. [ ] Add HTML templates for /, /signup, /login, /lookup
-7. [ ] Implement UI concurrent handling (uncertain, error)
-8. [ ] Update export/import for compatibility
-9. [ ] Test locally
-10. [ ] Build and verify
+1. [ ] Update availability with explain parameter
+2. [ ] Add history endpoint
+3. [ ] Add decision endpoint
+4. [ ] Add manager_user_ids to restaurants
+5. [ ] Add policies endpoint (POST/GET)
+6. [ ] Update reservation responses with revision/accepted_terms
+7. [ ] Add expected_revision to PATCH
+8. [ ] Add recurring reservations (POST/GET series)
+9. [ ] Update combined table history
+10. [ ] Test export/import compatibility
+11. [ ] Test locally
