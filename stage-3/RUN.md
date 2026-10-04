@@ -26,3 +26,10 @@ Run the unit tests without Docker (needs Go 1.22+): `go test ./...`
 - Browser UI (server-rendered shells, inline JS, no external assets): `/`, `/signup`, `/login`, `/lookup`.
 - Combined tables: restaurant fixtures accept `combinable` pairs; bookings accept `table_ids`.
 - `go test ./...` also runs the stage-2 tests (combined tables, stage-1 export import, UI routes).
+
+## Stage 3 additions
+
+- `GET /availability?...&explain=true`, reservation `revision` / `accepted_terms`, `GET /reservations/{ref}/history` and `/decision`.
+- Restaurant `manager_user_ids`, `POST|GET /restaurants/{id}/policies` (policy 0 is the base configuration).
+- `PATCH` accepts `expected_revision`; `POST /series`, `GET /series/{id}`.
+- Exports now carry policies, history and series; stage-1 and stage-2 exports import (history is synthesised for them).

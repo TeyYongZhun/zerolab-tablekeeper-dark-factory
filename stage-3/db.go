@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS restaurants (
     slot_minutes INTEGER NOT NULL,
     reservation_duration_minutes INTEGER NOT NULL,
     cancellation_cutoff_minutes INTEGER NOT NULL,
-    combinable TEXT NOT NULL DEFAULT '[]'
+    combinable TEXT NOT NULL DEFAULT '[]',
+    manager_user_ids TEXT NOT NULL DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS opening_hours (
     id INTEGER PRIMARY KEY,
@@ -54,7 +55,9 @@ CREATE TABLE IF NOT EXISTS reservations (
     status TEXT NOT NULL DEFAULT 'confirmed',
     starts_at INTEGER NOT NULL,
     ends_at INTEGER NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 1,
+    terms TEXT NOT NULL DEFAULT '{}'
 );
 CREATE TABLE IF NOT EXISTS reservation_tables (
     reservation_id TEXT NOT NULL REFERENCES reservations(id),
@@ -80,10 +83,41 @@ CREATE TABLE IF NOT EXISTS idempotency_keys (
     created_at TEXT NOT NULL,
     PRIMARY KEY (key, user_id)
 );
+CREATE TABLE IF NOT EXISTS policies (
+    id INTEGER PRIMARY KEY,
+    restaurant_id TEXT NOT NULL REFERENCES restaurants(id),
+    policy_version INTEGER NOT NULL,
+    effective_from TEXT NOT NULL,
+    body TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS reservation_history (
+    reservation_id TEXT NOT NULL REFERENCES reservations(id),
+    seq INTEGER NOT NULL,
+    at TEXT NOT NULL,
+    event TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    terms TEXT NOT NULL,
+    changes TEXT NOT NULL,
+    PRIMARY KEY (reservation_id, seq)
+);
+CREATE TABLE IF NOT EXISTS series (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    interval_weeks INTEGER NOT NULL,
+    revision INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS series_occurrences (
+    series_id TEXT NOT NULL REFERENCES series(id),
+    idx INTEGER NOT NULL,
+    reservation_id TEXT NOT NULL REFERENCES reservations(id),
+    exception INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (series_id, idx),
+    UNIQUE (reservation_id)
+);
 `
 
 // delete order respects foreign keys.
-var allTables = []string{"idempotency_keys", "tokens", "reservation_tables", "reservations", "opening_hours", "tables", "restaurants", "users"}
+var allTables = []string{"series_occurrences", "series", "reservation_history", "policies", "idempotency_keys", "tokens", "reservation_tables", "reservations", "opening_hours", "tables", "restaurants", "users"}
 
 type querier interface {
 	Exec(query string, args ...any) (sql.Result, error)
@@ -152,17 +186,20 @@ type restaurant struct {
 	Hours    []openHours
 	Tables   []tableRow
 	Combos   [][]string
+	Managers []string
+	Policies []policy
 }
 
 func loadRestaurant(q querier, id string) (*restaurant, error) {
 	r := &restaurant{}
-	var combRaw string
-	err := q.QueryRow(`SELECT id,name,timezone,slot_minutes,reservation_duration_minutes,cancellation_cutoff_minutes,combinable FROM restaurants WHERE id=?`, id).
-		Scan(&r.ID, &r.Name, &r.Timezone, &r.Slot, &r.Duration, &r.Cutoff, &combRaw)
+	var combRaw, mgrRaw string
+	err := q.QueryRow(`SELECT id,name,timezone,slot_minutes,reservation_duration_minutes,cancellation_cutoff_minutes,combinable,manager_user_ids FROM restaurants WHERE id=?`, id).
+		Scan(&r.ID, &r.Name, &r.Timezone, &r.Slot, &r.Duration, &r.Cutoff, &combRaw, &mgrRaw)
 	if err != nil {
 		return nil, err
 	}
 	json.Unmarshal([]byte(combRaw), &r.Combos)
+	json.Unmarshal([]byte(mgrRaw), &r.Managers)
 	r.Loc, err = time.LoadLocation(r.Timezone)
 	if err != nil {
 		return nil, err
@@ -193,6 +230,22 @@ func loadRestaurant(q querier, id string) (*restaurant, error) {
 		r.Tables = append(r.Tables, t)
 	}
 	rows.Close()
+	rows, err = q.Query(`SELECT policy_version,effective_from,body FROM policies WHERE restaurant_id=? ORDER BY id`, id)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var p policy
+		var body string
+		if err := rows.Scan(&p.Version, &p.EffectiveFrom, &body); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		p.terms = *parseTerms(body)
+		p.Version = p.terms.Version
+		r.Policies = append(r.Policies, p)
+	}
+	rows.Close()
 	return r, nil
 }
 
@@ -206,15 +259,16 @@ type fixtureUser struct {
 }
 
 type fixtureRestaurant struct {
-	ID         string      `json:"id"`
-	Name       string      `json:"name"`
-	Timezone   string      `json:"timezone"`
-	Slot       int         `json:"slot_minutes"`
-	Duration   int         `json:"reservation_duration_minutes"`
-	Cutoff     int         `json:"cancellation_cutoff_minutes"`
-	OpeningHrs []openHours `json:"opening_hours"`
-	Tables     []tableRow  `json:"tables"`
-	Combinable [][]string  `json:"combinable"`
+	ID             string      `json:"id"`
+	Name           string      `json:"name"`
+	Timezone       string      `json:"timezone"`
+	Slot           int         `json:"slot_minutes"`
+	Duration       int         `json:"reservation_duration_minutes"`
+	Cutoff         int         `json:"cancellation_cutoff_minutes"`
+	OpeningHrs     []openHours `json:"opening_hours"`
+	Tables         []tableRow  `json:"tables"`
+	Combinable     [][]string  `json:"combinable"`
+	ManagerUserIDs []string    `json:"manager_user_ids"`
 }
 
 type fixtureReservation struct {
@@ -291,8 +345,13 @@ func applyFixture(tx querier, fx *fixture) error {
 			return cerr
 		}
 		combJSON, _ := json.Marshal(combos)
-		if _, err := tx.Exec(`INSERT INTO restaurants(id,name,timezone,slot_minutes,reservation_duration_minutes,cancellation_cutoff_minutes,combinable) VALUES(?,?,?,?,?,?,?)`,
-			r.ID, r.Name, r.Timezone, r.Slot, r.Duration, r.Cutoff, string(combJSON)); err != nil {
+		mgr := r.ManagerUserIDs
+		if mgr == nil {
+			mgr = []string{}
+		}
+		mgrJSON, _ := json.Marshal(mgr)
+		if _, err := tx.Exec(`INSERT INTO restaurants(id,name,timezone,slot_minutes,reservation_duration_minutes,cancellation_cutoff_minutes,combinable,manager_user_ids) VALUES(?,?,?,?,?,?,?,?)`,
+			r.ID, r.Name, r.Timezone, r.Slot, r.Duration, r.Cutoff, string(combJSON), string(mgrJSON)); err != nil {
 			return invalid("restaurant %q rejected: %v", r.ID, err)
 		}
 		for _, h := range r.OpeningHrs {
@@ -393,7 +452,8 @@ func seedReservation(tx querier, rv fixtureReservation, tableOwner map[string]st
 	default:
 		return invalid("reservation %q has no start time", rv.ID)
 	}
-	end := start.Add(time.Duration(rest.Duration) * time.Minute)
+	tm := rest.termsFor(fmtLocal(start, rest.Loc)[:10])
+	end := start.Add(tm.duration())
 	if rv.EndsAt != "" {
 		end, err = time.Parse(time.RFC3339, rv.EndsAt)
 		if err != nil || !end.After(start) {
@@ -406,8 +466,34 @@ func seedReservation(tx querier, rv fixtureReservation, tableOwner map[string]st
 	if len(tableIDs) == 2 && !rest.pairAllowed(tableIDs[0], tableIDs[1]) {
 		return invalid("reservation %q uses a pair that is not combinable", rv.ID)
 	}
-	if err := insertReservation(tx, rv.ID, rv.Reference, rv.UserID, rv.RestaurantID, tableIDs, rv.PartySize, rv.Status, start.Unix(), end.Unix(), rv.CreatedAt); err != nil {
+	if !refRe.MatchString(rv.Reference) {
+		return invalid("reservation %q reference must be 6-12 characters of A-Z0-9", rv.ID)
+	}
+	v := &reservation{ID: rv.ID, Ref: rv.Reference, UserID: rv.UserID, RestID: rv.RestaurantID, Status: rv.Status,
+		CreatedAt: rv.CreatedAt, TableIDs: tableIDs, Party: rv.PartySize, Start: start.Unix(), End: end.Unix(),
+		Rev: 1, Terms: tm}
+	if err := insertReservation(tx, v); err != nil {
 		return invalid("reservation %q rejected: %v", rv.ID, err)
+	}
+	return seedHistory(tx, rest, v)
+}
+
+// seedHistory writes the history a reservation would have had: a created
+// entry and, for cancelled reservations, the cancellation.
+func seedHistory(q querier, rest *restaurant, v *reservation) error {
+	status := v.Status
+	v.Status = "confirmed"
+	v.Rev = 1
+	if err := recordHistory(q, rest.Loc, v, "created", buildChanges(false, nil, "", 0, v.TableIDs, fmtLocal(time.Unix(v.Start, 0), rest.Loc), v.Party), v.CreatedAt); err != nil {
+		return err
+	}
+	if status == "cancelled" {
+		v.Status = "cancelled"
+		v.Rev = 2
+		if _, err := q.Exec(`UPDATE reservations SET revision=2 WHERE id=?`, v.ID); err != nil {
+			return err
+		}
+		return recordHistory(q, rest.Loc, v, "cancelled", []map[string]any{}, v.CreatedAt)
 	}
 	return nil
 }
@@ -422,13 +508,14 @@ type stateUser struct {
 }
 
 type stateRestaurant struct {
-	ID         string     `json:"id"`
-	Name       string     `json:"name"`
-	Timezone   string     `json:"timezone"`
-	Slot       int        `json:"slot_minutes"`
-	Duration   int        `json:"reservation_duration_minutes"`
-	Cutoff     int        `json:"cancellation_cutoff_minutes"`
-	Combinable [][]string `json:"combinable"`
+	ID             string     `json:"id"`
+	Name           string     `json:"name"`
+	Timezone       string     `json:"timezone"`
+	Slot           int        `json:"slot_minutes"`
+	Duration       int        `json:"reservation_duration_minutes"`
+	Cutoff         int        `json:"cancellation_cutoff_minutes"`
+	Combinable     [][]string `json:"combinable"`
+	ManagerUserIDs []string   `json:"manager_user_ids"`
 }
 
 type stateHours struct {
@@ -448,17 +535,19 @@ type stateTable struct {
 // stateReservation keeps the stage-1 "table_id" field for compatibility;
 // "table_ids" carries the full set and wins when present.
 type stateReservation struct {
-	ID           string   `json:"id"`
-	Reference    string   `json:"reference"`
-	UserID       string   `json:"user_id"`
-	RestaurantID string   `json:"restaurant_id"`
-	TableID      string   `json:"table_id"`
-	TableIDs     []string `json:"table_ids"`
-	PartySize    int      `json:"party_size"`
-	Status       string   `json:"status"`
-	StartsAt     int64    `json:"starts_at_unix"`
-	EndsAt       int64    `json:"ends_at_unix"`
-	CreatedAt    string   `json:"created_at"`
+	ID            string   `json:"id"`
+	Reference     string   `json:"reference"`
+	UserID        string   `json:"user_id"`
+	RestaurantID  string   `json:"restaurant_id"`
+	TableID       string   `json:"table_id"`
+	TableIDs      []string `json:"table_ids"`
+	PartySize     int      `json:"party_size"`
+	Status        string   `json:"status"`
+	StartsAt      int64    `json:"starts_at_unix"`
+	EndsAt        int64    `json:"ends_at_unix"`
+	CreatedAt     string   `json:"created_at"`
+	Revision      int      `json:"revision"`
+	AcceptedTerms *terms   `json:"accepted_terms"`
 }
 
 type stateToken struct {
@@ -476,18 +565,52 @@ type stateIdem struct {
 	CreatedAt       string `json:"created_at"`
 }
 
-type stateDoc struct {
-	Users           []stateUser        `json:"users"`
-	Restaurants     []stateRestaurant  `json:"restaurants"`
-	OpeningHours    []stateHours       `json:"opening_hours"`
-	Tables          []stateTable       `json:"tables"`
-	Reservations    []stateReservation `json:"reservations"`
-	Tokens          []stateToken       `json:"tokens"`
-	IdempotencyKeys []stateIdem        `json:"idempotency_keys"`
+type statePolicy struct {
+	RestaurantID  string `json:"restaurant_id"`
+	EffectiveFrom string `json:"effective_from"`
+	Terms         terms  `json:"terms"`
 }
 
-func scanAll(q querier, query string, each func(r *sql.Rows) error) error {
-	rows, err := q.Query(query)
+type stateHistory struct {
+	ReservationID string          `json:"reservation_id"`
+	Seq           int             `json:"seq"`
+	At            string          `json:"at"`
+	Event         string          `json:"event"`
+	Revision      int             `json:"revision"`
+	AcceptedTerms terms           `json:"accepted_terms"`
+	Changes       json.RawMessage `json:"changes"`
+}
+
+type stateSeries struct {
+	ID            string `json:"id"`
+	UserID        string `json:"user_id"`
+	IntervalWeeks int    `json:"interval_weeks"`
+	Revision      int    `json:"revision"`
+}
+
+type stateOccurrence struct {
+	SeriesID      string `json:"series_id"`
+	Index         int    `json:"index"`
+	ReservationID string `json:"reservation_id"`
+	Exception     bool   `json:"exception"`
+}
+
+type stateDoc struct {
+	Users             []stateUser        `json:"users"`
+	Restaurants       []stateRestaurant  `json:"restaurants"`
+	OpeningHours      []stateHours       `json:"opening_hours"`
+	Tables            []stateTable       `json:"tables"`
+	Policies          []statePolicy      `json:"policies"`
+	Reservations      []stateReservation `json:"reservations"`
+	History           []stateHistory     `json:"history"`
+	Series            []stateSeries      `json:"series"`
+	SeriesOccurrences []stateOccurrence  `json:"series_occurrences"`
+	Tokens            []stateToken       `json:"tokens"`
+	IdempotencyKeys   []stateIdem        `json:"idempotency_keys"`
+}
+
+func scanAll(q querier, query string, each func(r *sql.Rows) error, args ...any) error {
+	rows, err := q.Query(query, args...)
 	if err != nil {
 		return err
 	}
@@ -504,6 +627,7 @@ func exportState(q querier) (*stateDoc, error) {
 	s := &stateDoc{
 		Users: []stateUser{}, Restaurants: []stateRestaurant{}, OpeningHours: []stateHours{}, Tables: []stateTable{},
 		Reservations: []stateReservation{}, Tokens: []stateToken{}, IdempotencyKeys: []stateIdem{},
+		Policies: []statePolicy{}, History: []stateHistory{}, Series: []stateSeries{}, SeriesOccurrences: []stateOccurrence{},
 	}
 	if err := scanAll(q, `SELECT id,email,password_hash,display_name FROM users ORDER BY rowid`, func(r *sql.Rows) error {
 		var x stateUser
@@ -513,10 +637,14 @@ func exportState(q querier) (*stateDoc, error) {
 	}); err != nil {
 		return nil, err
 	}
-	if err := scanAll(q, `SELECT id,name,timezone,slot_minutes,reservation_duration_minutes,cancellation_cutoff_minutes,combinable FROM restaurants ORDER BY rowid`, func(r *sql.Rows) error {
+	if err := scanAll(q, `SELECT id,name,timezone,slot_minutes,reservation_duration_minutes,cancellation_cutoff_minutes,combinable,manager_user_ids FROM restaurants ORDER BY rowid`, func(r *sql.Rows) error {
 		var x stateRestaurant
-		var comb string
-		err := r.Scan(&x.ID, &x.Name, &x.Timezone, &x.Slot, &x.Duration, &x.Cutoff, &comb)
+		var comb, mgr string
+		err := r.Scan(&x.ID, &x.Name, &x.Timezone, &x.Slot, &x.Duration, &x.Cutoff, &comb, &mgr)
+		json.Unmarshal([]byte(mgr), &x.ManagerUserIDs)
+		if x.ManagerUserIDs == nil {
+			x.ManagerUserIDs = []string{}
+		}
 		json.Unmarshal([]byte(comb), &x.Combinable)
 		if x.Combinable == nil {
 			x.Combinable = [][]string{}
@@ -542,9 +670,11 @@ func exportState(q querier) (*stateDoc, error) {
 	}); err != nil {
 		return nil, err
 	}
-	if err := scanAll(q, `SELECT id,reference,user_id,restaurant_id,party_size,status,starts_at,ends_at,created_at FROM reservations ORDER BY rowid`, func(r *sql.Rows) error {
+	if err := scanAll(q, `SELECT id,reference,user_id,restaurant_id,party_size,status,starts_at,ends_at,created_at,revision,terms FROM reservations ORDER BY rowid`, func(r *sql.Rows) error {
 		var x stateReservation
-		err := r.Scan(&x.ID, &x.Reference, &x.UserID, &x.RestaurantID, &x.PartySize, &x.Status, &x.StartsAt, &x.EndsAt, &x.CreatedAt)
+		var tj string
+		err := r.Scan(&x.ID, &x.Reference, &x.UserID, &x.RestaurantID, &x.PartySize, &x.Status, &x.StartsAt, &x.EndsAt, &x.CreatedAt, &x.Revision, &tj)
+		x.AcceptedTerms = parseTerms(tj)
 		s.Reservations = append(s.Reservations, x)
 		return err
 	}); err != nil {
@@ -586,6 +716,45 @@ func exportState(q querier) (*stateDoc, error) {
 	}); err != nil {
 		return nil, err
 	}
+	if err := scanAll(q, `SELECT restaurant_id,effective_from,body FROM policies ORDER BY id`, func(r *sql.Rows) error {
+		var x statePolicy
+		var body string
+		err := r.Scan(&x.RestaurantID, &x.EffectiveFrom, &body)
+		x.Terms = *parseTerms(body)
+		s.Policies = append(s.Policies, x)
+		return err
+	}); err != nil {
+		return nil, err
+	}
+	if err := scanAll(q, `SELECT reservation_id,seq,at,event,revision,terms,changes FROM reservation_history ORDER BY reservation_id,seq`, func(r *sql.Rows) error {
+		var x stateHistory
+		var tj, cj string
+		err := r.Scan(&x.ReservationID, &x.Seq, &x.At, &x.Event, &x.Revision, &tj, &cj)
+		x.AcceptedTerms = *parseTerms(tj)
+		x.Changes = json.RawMessage(cj)
+		s.History = append(s.History, x)
+		return err
+	}); err != nil {
+		return nil, err
+	}
+	if err := scanAll(q, `SELECT id,user_id,interval_weeks,revision FROM series ORDER BY rowid`, func(r *sql.Rows) error {
+		var x stateSeries
+		err := r.Scan(&x.ID, &x.UserID, &x.IntervalWeeks, &x.Revision)
+		s.Series = append(s.Series, x)
+		return err
+	}); err != nil {
+		return nil, err
+	}
+	if err := scanAll(q, `SELECT series_id,idx,reservation_id,exception FROM series_occurrences ORDER BY series_id,idx`, func(r *sql.Rows) error {
+		var x stateOccurrence
+		var ex int
+		err := r.Scan(&x.SeriesID, &x.Index, &x.ReservationID, &ex)
+		x.Exception = ex != 0
+		s.SeriesOccurrences = append(s.SeriesOccurrences, x)
+		return err
+	}); err != nil {
+		return nil, err
+	}
 	return s, nil
 }
 
@@ -608,8 +777,13 @@ func importState(tx querier, s *stateDoc) error {
 			comb = [][]string{}
 		}
 		combJSON, _ := json.Marshal(comb)
-		if _, err := tx.Exec(`INSERT INTO restaurants(id,name,timezone,slot_minutes,reservation_duration_minutes,cancellation_cutoff_minutes,combinable) VALUES(?,?,?,?,?,?,?)`,
-			r.ID, r.Name, r.Timezone, r.Slot, r.Duration, r.Cutoff, string(combJSON)); err != nil {
+		mgr := r.ManagerUserIDs
+		if mgr == nil {
+			mgr = []string{}
+		}
+		mgrJSON, _ := json.Marshal(mgr)
+		if _, err := tx.Exec(`INSERT INTO restaurants(id,name,timezone,slot_minutes,reservation_duration_minutes,cancellation_cutoff_minutes,combinable,manager_user_ids) VALUES(?,?,?,?,?,?,?,?)`,
+			r.ID, r.Name, r.Timezone, r.Slot, r.Duration, r.Cutoff, string(combJSON), string(mgrJSON)); err != nil {
 			return bad(err)
 		}
 	}
@@ -623,6 +797,18 @@ func importState(tx querier, s *stateDoc) error {
 			return bad(err)
 		}
 	}
+	for _, p := range s.Policies {
+		body := p.Terms.json()
+		if _, err := tx.Exec(`INSERT INTO policies(restaurant_id,policy_version,effective_from,body) VALUES(?,?,?,?)`,
+			p.RestaurantID, p.Terms.Version, p.EffectiveFrom, body); err != nil {
+			return bad(err)
+		}
+	}
+	restCache := map[string]*restaurant{}
+	hasHistory := map[string]bool{}
+	for _, h := range s.History {
+		hasHistory[h.ReservationID] = true
+	}
 	for _, r := range s.Reservations {
 		if r.Status != "confirmed" && r.Status != "cancelled" {
 			return invalid("state has an invalid reservation status")
@@ -634,7 +820,52 @@ func importState(tx querier, s *stateDoc) error {
 		if len(ids) < 1 || len(ids) > 2 {
 			return invalid("state has a reservation without one or two tables")
 		}
-		if err := insertReservation(tx, r.ID, r.Reference, r.UserID, r.RestaurantID, ids, r.PartySize, r.Status, r.StartsAt, r.EndsAt, r.CreatedAt); err != nil {
+		rest := restCache[r.RestaurantID]
+		if rest == nil {
+			var err error
+			if rest, err = loadRestaurant(tx, r.RestaurantID); err != nil {
+				return invalid("state reservation has an unknown restaurant")
+			}
+			restCache[r.RestaurantID] = rest
+		}
+		v := &reservation{ID: r.ID, Ref: r.Reference, UserID: r.UserID, RestID: r.RestaurantID, Status: r.Status,
+			CreatedAt: r.CreatedAt, TableIDs: ids, Party: r.PartySize, Start: r.StartsAt, End: r.EndsAt, Rev: r.Revision, Terms: r.AcceptedTerms}
+		legacy := v.Rev < 1 || v.Terms == nil || v.Terms.Slot == 0
+		if legacy {
+			// stage-1/2 export: no revision or accepted terms, derive them
+			v.Terms = rest.termsFor(fmtLocal(time.Unix(v.Start, 0), rest.Loc)[:10])
+			v.Rev = 1
+		}
+		if err := insertReservation(tx, v); err != nil {
+			return bad(err)
+		}
+		if legacy && !hasHistory[v.ID] {
+			if err := seedHistory(tx, rest, v); err != nil {
+				return bad(err)
+			}
+		}
+	}
+	for _, h := range s.History {
+		ch := string(h.Changes)
+		if ch == "" || ch == "null" {
+			ch = "[]"
+		}
+		if _, err := tx.Exec(`INSERT INTO reservation_history(reservation_id,seq,at,event,revision,terms,changes) VALUES(?,?,?,?,?,?,?)`,
+			h.ReservationID, h.Seq, h.At, h.Event, h.Revision, h.AcceptedTerms.json(), ch); err != nil {
+			return bad(err)
+		}
+	}
+	for _, se := range s.Series {
+		if _, err := tx.Exec(`INSERT INTO series(id,user_id,interval_weeks,revision) VALUES(?,?,?,?)`, se.ID, se.UserID, se.IntervalWeeks, se.Revision); err != nil {
+			return bad(err)
+		}
+	}
+	for _, o := range s.SeriesOccurrences {
+		ex := 0
+		if o.Exception {
+			ex = 1
+		}
+		if _, err := tx.Exec(`INSERT INTO series_occurrences(series_id,idx,reservation_id,exception) VALUES(?,?,?,?)`, o.SeriesID, o.Index, o.ReservationID, ex); err != nil {
 			return bad(err)
 		}
 	}
@@ -689,12 +920,12 @@ func normalizeCombos(tables []tableRow, combos [][]string) ([][]string, *apiErr)
 }
 
 // insertReservation stores a reservation row and its table set.
-func insertReservation(q querier, id, ref, uid, restID string, tableIDs []string, party int, status string, start, end int64, createdAt string) error {
-	if _, err := q.Exec(`INSERT INTO reservations(id,reference,user_id,restaurant_id,party_size,status,starts_at,ends_at,created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
-		id, ref, uid, restID, party, status, start, end, createdAt); err != nil {
+func insertReservation(q querier, v *reservation) error {
+	if _, err := q.Exec(`INSERT INTO reservations(id,reference,user_id,restaurant_id,party_size,status,starts_at,ends_at,created_at,revision,terms) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		v.ID, v.Ref, v.UserID, v.RestID, v.Party, v.Status, v.Start, v.End, v.CreatedAt, v.Rev, v.Terms.json()); err != nil {
 		return err
 	}
-	return setReservationTables(q, id, restID, tableIDs)
+	return setReservationTables(q, v.ID, v.RestID, v.TableIDs)
 }
 
 func setReservationTables(q querier, id, restID string, tableIDs []string) error {
