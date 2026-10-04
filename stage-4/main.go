@@ -342,6 +342,17 @@ func overlapExists(q querier, restID string, tableIDs []string, start, end int64
 	err := q.QueryRow(`SELECT 1 FROM reservations r JOIN reservation_tables rt ON rt.reservation_id=r.id
 		WHERE r.restaurant_id=? AND r.status='confirmed' AND r.id<>? AND r.starts_at<? AND r.ends_at>?
 		AND rt.table_id IN (`+ph+`) LIMIT 1`, args...).Scan(&one)
+	if err == nil {
+		return true, nil
+	}
+	if err != sql.ErrNoRows {
+		return false, err
+	}
+	cargs := []any{restID, end, start}
+	for _, t := range tableIDs {
+		cargs = append(cargs, t)
+	}
+	err = q.QueryRow(`SELECT 1 FROM closures WHERE restaurant_id=? AND from_unix<? AND to_unix>? AND table_id IN (`+ph+`) LIMIT 1`, cargs...).Scan(&one)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -759,6 +770,9 @@ func (s *server) createReservation(w http.ResponseWriter, r *http.Request) {
 		fail(w, err)
 		return
 	}
+	if !bumpOrFail(w, tx, rid) {
+		return
+	}
 	body, _ := json.Marshal(v.json(rest.Loc))
 	if _, err := tx.Exec(`INSERT INTO idempotency_keys(key,user_id,request_path,request_body_hash,response_body,created_at) VALUES(?,?,?,?,?,?)`,
 		key, uid, "/reservations", hash, string(body), nowStamp()); err != nil {
@@ -898,6 +912,9 @@ func (s *server) cancelReservation(w http.ResponseWriter, r *http.Request) {
 			fail(w, err)
 			return
 		}
+		if !bumpOrFail(w, tx, v.RestID) {
+			return
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		fail(w, err)
@@ -977,6 +994,15 @@ func resolveAmend(rest *restaurant, v *reservation, a *amendment) (*amended, *ap
 // commitAmend writes a real amendment: new values and terms, revision+1, a
 // history entry, and the series exception bookkeeping.
 func commitAmend(tx querier, rest *restaurant, v *reservation, am *amended) error {
+	return commitAmendOpt(tx, rest, v, am, true)
+}
+
+// commitAmendSeries is commitAmend without the per-occurrence exception marking.
+func commitAmendSeries(tx querier, rest *restaurant, v *reservation, am *amended) error {
+	return commitAmendOpt(tx, rest, v, am, false)
+}
+
+func commitAmendOpt(tx querier, rest *restaurant, v *reservation, am *amended, touch bool) error {
 	oldLocal := fmtLocal(time.Unix(v.Start, 0), rest.Loc)
 	oldTables, oldParty := v.TableIDs, v.Party
 	v.Rev++
@@ -991,6 +1017,9 @@ func commitAmend(tx querier, rest *restaurant, v *reservation, am *amended) erro
 	if err := recordHistory(tx, rest.Loc, v, "changed",
 		buildChanges(true, oldTables, oldLocal, oldParty, v.TableIDs, am.in.StartLocal, v.Party), ""); err != nil {
 		return err
+	}
+	if !touch {
+		return nil
 	}
 	return touchSeries(tx, v.ID, true)
 }
@@ -1063,6 +1092,9 @@ func (s *server) patchReservation(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := commitAmend(tx, rest, v, am); err != nil {
 			fail(w, err)
+			return
+		}
+		if !bumpOrFail(w, tx, v.RestID) {
 			return
 		}
 	}
@@ -1181,6 +1213,7 @@ func (s *server) moves(w http.ResponseWriter, r *http.Request) {
 		}
 		res[i] = am
 	}
+	changedAny := false
 	for i, v := range vs {
 		if res[i].noop {
 			continue
@@ -1189,6 +1222,10 @@ func (s *server) moves(w http.ResponseWriter, r *http.Request) {
 			fail(w, err)
 			return
 		}
+		changedAny = true
+	}
+	if changedAny && !bumpOrFail(w, tx, rest.ID) {
+		return
 	}
 	for _, v := range vs {
 		busy, err := overlapExists(tx, v.RestID, v.TableIDs, v.Start, v.End, v.ID)
@@ -1330,6 +1367,7 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("POST /reservation-moves", s.moves)
 	registerUI(mux)
 	s.registerStage3(mux)
+	s.registerStage4(mux)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, errNotFound)
 	})

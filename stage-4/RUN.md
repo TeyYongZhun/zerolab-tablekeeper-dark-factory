@@ -33,3 +33,9 @@ Run the unit tests without Docker (needs Go 1.22+): `go test ./...`
 - Restaurant `manager_user_ids`, `POST|GET /restaurants/{id}/policies` (policy 0 is the base configuration).
 - `PATCH` accepts `expected_revision`; `POST /series`, `GET /series/{id}`.
 - Exports now carry policies, history and series; stage-1 and stage-2 exports import (history is synthesised for them).
+
+## Stage 4 additions
+
+- Seating replans: `POST /restaurants/{id}/replans` (alias `/replots`) and `.../{plan_id}/apply`; applied closures remove tables from availability and booking.
+- `POST /series/{id}/amend` shifts the clock time of later occurrences.
+- Restaurant revision counts every booking, policy or seating change; plans are only valid at the revision they were made.

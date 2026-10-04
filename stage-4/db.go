@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS restaurants (
     reservation_duration_minutes INTEGER NOT NULL,
     cancellation_cutoff_minutes INTEGER NOT NULL,
     combinable TEXT NOT NULL DEFAULT '[]',
-    manager_user_ids TEXT NOT NULL DEFAULT '[]'
+    manager_user_ids TEXT NOT NULL DEFAULT '[]',
+    revision INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS opening_hours (
     id INTEGER PRIMARY KEY,
@@ -98,6 +99,7 @@ CREATE TABLE IF NOT EXISTS reservation_history (
     revision INTEGER NOT NULL,
     terms TEXT NOT NULL,
     changes TEXT NOT NULL,
+    plan_id TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (reservation_id, seq)
 );
 CREATE TABLE IF NOT EXISTS series (
@@ -114,10 +116,31 @@ CREATE TABLE IF NOT EXISTS series_occurrences (
     PRIMARY KEY (series_id, idx),
     UNIQUE (reservation_id)
 );
+CREATE TABLE IF NOT EXISTS closures (
+    id INTEGER PRIMARY KEY,
+    restaurant_id TEXT NOT NULL,
+    table_id TEXT NOT NULL,
+    from_unix INTEGER NOT NULL,
+    to_unix INTEGER NOT NULL,
+    from_text TEXT NOT NULL,
+    to_text TEXT NOT NULL,
+    plan_id TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS plans (
+    id TEXT PRIMARY KEY,
+    restaurant_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    closure TEXT NOT NULL,
+    assignments TEXT NOT NULL,
+    moved_count INTEGER NOT NULL,
+    unused_seats INTEGER NOT NULL,
+    applied INTEGER NOT NULL DEFAULT 0,
+    apply_key TEXT NOT NULL DEFAULT '',
+    apply_response TEXT NOT NULL DEFAULT ''
+);
 `
 
 // delete order respects foreign keys.
-var allTables = []string{"series_occurrences", "series", "reservation_history", "policies", "idempotency_keys", "tokens", "reservation_tables", "reservations", "opening_hours", "tables", "restaurants", "users"}
+var allTables = []string{"plans", "closures", "series_occurrences", "series", "reservation_history", "policies", "idempotency_keys", "tokens", "reservation_tables", "reservations", "opening_hours", "tables", "restaurants", "users"}
 
 type querier interface {
 	Exec(query string, args ...any) (sql.Result, error)
@@ -188,13 +211,14 @@ type restaurant struct {
 	Combos   [][]string
 	Managers []string
 	Policies []policy
+	Revision int
 }
 
 func loadRestaurant(q querier, id string) (*restaurant, error) {
 	r := &restaurant{}
 	var combRaw, mgrRaw string
-	err := q.QueryRow(`SELECT id,name,timezone,slot_minutes,reservation_duration_minutes,cancellation_cutoff_minutes,combinable,manager_user_ids FROM restaurants WHERE id=?`, id).
-		Scan(&r.ID, &r.Name, &r.Timezone, &r.Slot, &r.Duration, &r.Cutoff, &combRaw, &mgrRaw)
+	err := q.QueryRow(`SELECT id,name,timezone,slot_minutes,reservation_duration_minutes,cancellation_cutoff_minutes,combinable,manager_user_ids,revision FROM restaurants WHERE id=?`, id).
+		Scan(&r.ID, &r.Name, &r.Timezone, &r.Slot, &r.Duration, &r.Cutoff, &combRaw, &mgrRaw, &r.Revision)
 	if err != nil {
 		return nil, err
 	}
@@ -516,6 +540,7 @@ type stateRestaurant struct {
 	Cutoff         int        `json:"cancellation_cutoff_minutes"`
 	Combinable     [][]string `json:"combinable"`
 	ManagerUserIDs []string   `json:"manager_user_ids"`
+	Revision       int        `json:"revision"`
 }
 
 type stateHours struct {
@@ -579,6 +604,7 @@ type stateHistory struct {
 	Revision      int             `json:"revision"`
 	AcceptedTerms terms           `json:"accepted_terms"`
 	Changes       json.RawMessage `json:"changes"`
+	PlanID        string          `json:"plan_id,omitempty"`
 }
 
 type stateSeries struct {
@@ -607,6 +633,8 @@ type stateDoc struct {
 	SeriesOccurrences []stateOccurrence  `json:"series_occurrences"`
 	Tokens            []stateToken       `json:"tokens"`
 	IdempotencyKeys   []stateIdem        `json:"idempotency_keys"`
+	Closures          []stateClosure     `json:"closures"`
+	Plans             []statePlan        `json:"plans"`
 }
 
 func scanAll(q querier, query string, each func(r *sql.Rows) error, args ...any) error {
@@ -637,10 +665,10 @@ func exportState(q querier) (*stateDoc, error) {
 	}); err != nil {
 		return nil, err
 	}
-	if err := scanAll(q, `SELECT id,name,timezone,slot_minutes,reservation_duration_minutes,cancellation_cutoff_minutes,combinable,manager_user_ids FROM restaurants ORDER BY rowid`, func(r *sql.Rows) error {
+	if err := scanAll(q, `SELECT id,name,timezone,slot_minutes,reservation_duration_minutes,cancellation_cutoff_minutes,combinable,manager_user_ids,revision FROM restaurants ORDER BY rowid`, func(r *sql.Rows) error {
 		var x stateRestaurant
 		var comb, mgr string
-		err := r.Scan(&x.ID, &x.Name, &x.Timezone, &x.Slot, &x.Duration, &x.Cutoff, &comb, &mgr)
+		err := r.Scan(&x.ID, &x.Name, &x.Timezone, &x.Slot, &x.Duration, &x.Cutoff, &comb, &mgr, &x.Revision)
 		json.Unmarshal([]byte(mgr), &x.ManagerUserIDs)
 		if x.ManagerUserIDs == nil {
 			x.ManagerUserIDs = []string{}
@@ -726,10 +754,10 @@ func exportState(q querier) (*stateDoc, error) {
 	}); err != nil {
 		return nil, err
 	}
-	if err := scanAll(q, `SELECT reservation_id,seq,at,event,revision,terms,changes FROM reservation_history ORDER BY reservation_id,seq`, func(r *sql.Rows) error {
+	if err := scanAll(q, `SELECT reservation_id,seq,at,event,revision,terms,changes,plan_id FROM reservation_history ORDER BY reservation_id,seq`, func(r *sql.Rows) error {
 		var x stateHistory
 		var tj, cj string
-		err := r.Scan(&x.ReservationID, &x.Seq, &x.At, &x.Event, &x.Revision, &tj, &cj)
+		err := r.Scan(&x.ReservationID, &x.Seq, &x.At, &x.Event, &x.Revision, &tj, &cj, &x.PlanID)
 		x.AcceptedTerms = *parseTerms(tj)
 		x.Changes = json.RawMessage(cj)
 		s.History = append(s.History, x)
@@ -753,6 +781,9 @@ func exportState(q querier) (*stateDoc, error) {
 		s.SeriesOccurrences = append(s.SeriesOccurrences, x)
 		return err
 	}); err != nil {
+		return nil, err
+	}
+	if err := exportSeating(q, s); err != nil {
 		return nil, err
 	}
 	return s, nil
@@ -782,8 +813,12 @@ func importState(tx querier, s *stateDoc) error {
 			mgr = []string{}
 		}
 		mgrJSON, _ := json.Marshal(mgr)
-		if _, err := tx.Exec(`INSERT INTO restaurants(id,name,timezone,slot_minutes,reservation_duration_minutes,cancellation_cutoff_minutes,combinable,manager_user_ids) VALUES(?,?,?,?,?,?,?,?)`,
-			r.ID, r.Name, r.Timezone, r.Slot, r.Duration, r.Cutoff, string(combJSON), string(mgrJSON)); err != nil {
+		rev := r.Revision
+		if rev < 1 {
+			rev = 1
+		}
+		if _, err := tx.Exec(`INSERT INTO restaurants(id,name,timezone,slot_minutes,reservation_duration_minutes,cancellation_cutoff_minutes,combinable,manager_user_ids,revision) VALUES(?,?,?,?,?,?,?,?,?)`,
+			r.ID, r.Name, r.Timezone, r.Slot, r.Duration, r.Cutoff, string(combJSON), string(mgrJSON), rev); err != nil {
 			return bad(err)
 		}
 	}
@@ -850,8 +885,8 @@ func importState(tx querier, s *stateDoc) error {
 		if ch == "" || ch == "null" {
 			ch = "[]"
 		}
-		if _, err := tx.Exec(`INSERT INTO reservation_history(reservation_id,seq,at,event,revision,terms,changes) VALUES(?,?,?,?,?,?,?)`,
-			h.ReservationID, h.Seq, h.At, h.Event, h.Revision, h.AcceptedTerms.json(), ch); err != nil {
+		if _, err := tx.Exec(`INSERT INTO reservation_history(reservation_id,seq,at,event,revision,terms,changes,plan_id) VALUES(?,?,?,?,?,?,?,?)`,
+			h.ReservationID, h.Seq, h.At, h.Event, h.Revision, h.AcceptedTerms.json(), ch, h.PlanID); err != nil {
 			return bad(err)
 		}
 	}
@@ -868,6 +903,9 @@ func importState(tx querier, s *stateDoc) error {
 		if _, err := tx.Exec(`INSERT INTO series_occurrences(series_id,idx,reservation_id,exception) VALUES(?,?,?,?)`, o.SeriesID, o.Index, o.ReservationID, ex); err != nil {
 			return bad(err)
 		}
+	}
+	if err := importSeating(tx, s); err != nil {
+		return err
 	}
 	for _, t := range s.Tokens {
 		if _, err := tx.Exec(`INSERT INTO tokens(token,user_id,created_at) VALUES(?,?,?)`, t.Token, t.UserID, t.CreatedAt); err != nil {
@@ -941,3 +979,70 @@ func setReservationTables(q querier, id, restID string, tableIDs []string) error
 }
 
 var refRe = regexp.MustCompile(`^[A-Z0-9]{6,12}$`)
+
+type stateClosure struct {
+	RestaurantID string `json:"restaurant_id"`
+	TableID      string `json:"table_id"`
+	From         string `json:"from"`
+	To           string `json:"to"`
+	PlanID       string `json:"plan_id"`
+}
+
+type statePlan struct {
+	ID            string          `json:"id"`
+	RestaurantID  string          `json:"restaurant_id"`
+	Revision      int             `json:"restaurant_revision"`
+	Closure       json.RawMessage `json:"closure"`
+	Assignments   json.RawMessage `json:"assignments"`
+	MovedCount    int             `json:"moved_count"`
+	UnusedSeats   int             `json:"unused_seats"`
+	Applied       bool            `json:"applied"`
+	ApplyKey      string          `json:"apply_key"`
+	ApplyResponse string          `json:"apply_response"`
+}
+
+func exportSeating(q querier, s *stateDoc) error {
+	s.Closures, s.Plans = []stateClosure{}, []statePlan{}
+	if err := scanAll(q, `SELECT restaurant_id,table_id,from_text,to_text,plan_id FROM closures ORDER BY id`, func(r *sql.Rows) error {
+		var x stateClosure
+		err := r.Scan(&x.RestaurantID, &x.TableID, &x.From, &x.To, &x.PlanID)
+		s.Closures = append(s.Closures, x)
+		return err
+	}); err != nil {
+		return err
+	}
+	return scanAll(q, `SELECT id,restaurant_id,revision,closure,assignments,moved_count,unused_seats,applied,apply_key,apply_response FROM plans ORDER BY rowid`, func(r *sql.Rows) error {
+		var x statePlan
+		var cl, as string
+		var ap int
+		err := r.Scan(&x.ID, &x.RestaurantID, &x.Revision, &cl, &as, &x.MovedCount, &x.UnusedSeats, &ap, &x.ApplyKey, &x.ApplyResponse)
+		x.Closure, x.Assignments, x.Applied = json.RawMessage(cl), json.RawMessage(as), ap != 0
+		s.Plans = append(s.Plans, x)
+		return err
+	})
+}
+
+func importSeating(tx querier, s *stateDoc) error {
+	for _, c := range s.Closures {
+		f, err1 := time.Parse(time.RFC3339, c.From)
+		t, err2 := time.Parse(time.RFC3339, c.To)
+		if err1 != nil || err2 != nil {
+			return invalid("state has an invalid closure")
+		}
+		if _, err := tx.Exec(`INSERT INTO closures(restaurant_id,table_id,from_unix,to_unix,from_text,to_text,plan_id) VALUES(?,?,?,?,?,?,?)`,
+			c.RestaurantID, c.TableID, f.Unix(), t.Unix(), c.From, c.To, c.PlanID); err != nil {
+			return invalid("state rejected: %v", err)
+		}
+	}
+	for _, p := range s.Plans {
+		ap := 0
+		if p.Applied {
+			ap = 1
+		}
+		if _, err := tx.Exec(`INSERT INTO plans(id,restaurant_id,revision,closure,assignments,moved_count,unused_seats,applied,apply_key,apply_response) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+			p.ID, p.RestaurantID, p.Revision, string(p.Closure), string(p.Assignments), p.MovedCount, p.UnusedSeats, ap, p.ApplyKey, p.ApplyResponse); err != nil {
+			return invalid("state rejected: %v", err)
+		}
+	}
+	return nil
+}

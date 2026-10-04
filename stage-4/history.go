@@ -62,6 +62,10 @@ func sameSet(a, b []string) bool {
 // recordHistory appends a history entry for v at its current revision and
 // terms. at is an RFC 3339 instant; empty means now.
 func recordHistory(q querier, loc *time.Location, v *reservation, event string, changes []map[string]any, at string) error {
+	return recordHistoryPlan(q, loc, v, event, changes, at, "")
+}
+
+func recordHistoryPlan(q querier, loc *time.Location, v *reservation, event string, changes []map[string]any, at, planID string) error {
 	t := time.Now()
 	if at != "" {
 		if p, err := time.Parse(time.RFC3339, at); err == nil {
@@ -73,8 +77,8 @@ func recordHistory(q querier, loc *time.Location, v *reservation, event string, 
 		return err
 	}
 	cj, _ := json.Marshal(changes)
-	_, err := q.Exec(`INSERT INTO reservation_history(reservation_id,seq,at,event,revision,terms,changes) VALUES(?,?,?,?,?,?,?)`,
-		v.ID, seq, fmtRFC(t, loc), event, v.Rev, v.Terms.json(), string(cj))
+	_, err := q.Exec(`INSERT INTO reservation_history(reservation_id,seq,at,event,revision,terms,changes,plan_id) VALUES(?,?,?,?,?,?,?,?)`,
+		v.ID, seq, fmtRFC(t, loc), event, v.Rev, v.Terms.json(), string(cj), planID)
 	return err
 }
 

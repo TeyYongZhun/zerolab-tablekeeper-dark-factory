@@ -44,12 +44,13 @@ func (s *server) history(w http.ResponseWriter, r *http.Request) {
 		Revision      int             `json:"revision"`
 		AcceptedTerms json.RawMessage `json:"accepted_terms"`
 		Changes       json.RawMessage `json:"changes"`
+		PlanID        string          `json:"plan_id,omitempty"`
 	}
 	entries := []entry{}
-	err := scanAll(s.db, `SELECT seq,at,event,revision,terms,changes FROM reservation_history WHERE reservation_id=? ORDER BY seq`, func(rows *sql.Rows) error {
+	err := scanAll(s.db, `SELECT seq,at,event,revision,terms,changes,plan_id FROM reservation_history WHERE reservation_id=? ORDER BY seq`, func(rows *sql.Rows) error {
 		var e entry
 		var tj, cj string
-		if err := rows.Scan(&e.Seq, &e.At, &e.Event, &e.Revision, &tj, &cj); err != nil {
+		if err := rows.Scan(&e.Seq, &e.At, &e.Event, &e.Revision, &tj, &cj, &e.PlanID); err != nil {
 			return err
 		}
 		e.AcceptedTerms, e.Changes = json.RawMessage(tj), json.RawMessage(cj)
@@ -162,6 +163,9 @@ func (s *server) publishPolicy(w http.ResponseWriter, r *http.Request) {
 	if _, err := tx.Exec(`INSERT INTO policies(restaurant_id,policy_version,effective_from,body) VALUES(?,?,?,?)`,
 		rest.ID, p.Version, p.EffectiveFrom, p.terms.json()); err != nil {
 		fail(w, err)
+		return
+	}
+	if !bumpOrFail(w, tx, rest.ID) {
 		return
 	}
 	body, _ := json.Marshal(p)
@@ -397,6 +401,9 @@ func (s *server) createSeries(w http.ResponseWriter, r *http.Request) {
 	body, ae := seriesJSON(tx, sid)
 	if ae != nil {
 		writeErr(w, ae)
+		return
+	}
+	if !bumpOrFail(w, tx, rest.ID) {
 		return
 	}
 	bj, _ := json.Marshal(body)
