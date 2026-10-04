@@ -1,8 +1,8 @@
-# Tablekeeper, built by a dark factory
+# Tablekeeper, built by a dark factory from Team ZeroLab
 
 Our entry for the [WeAreDevelopers x BAND Dark Factory hackathon](https://lablab.ai/ai-hackathons/wearedevelopers-hackathon).
 
-- **Team:** Tey Yong Zhun
+- **Team:** ZeroLab by Tey Yong Zhun
 - **Track:** `tablekeeper`, a restaurant reservation system
 - **Stage reached:** 4 of 4. A final `harness run --all --mode isolated` reports every folder
   claiming its own stage on the shipped checks.
