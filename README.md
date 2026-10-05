@@ -61,6 +61,22 @@ while signed out is refused, and succeeds once you log in.
 The seed script posts to the service's own `POST /_test/reset` fixture endpoint — the same hook
 the event harness uses. No application code is involved.
 
+## The hard part
+
+The track asks that a table is never double-booked, under concurrency, retries and time
+zones. Measured against the running `stage-4` container, seeded with the demo fixtures:
+
+| Check | Result |
+|---|---|
+| 20 parallel bookings, same table and same slot, distinct idempotency keys | 1 × `201`, 19 × `409` — exactly one winner |
+| 5 concurrent retries carrying the same idempotency key | one reservation, one reference |
+| `Europe/Berlin` and `Asia/Kuala_Lumpur` restaurants, same date | resolved to `+02:00` and `+08:00` |
+
+The concurrency case is asserted strictly in `stage-4/main_test.go`
+(`codes[201] != 1 || codes[409] != 19` fails the suite). Time zones come from the tz
+database embedded in the binary with `_ "time/tzdata"`, so the Alpine image needs no
+`tzdata` package.
+
 ## Results in brief
 
 | Stage | Outcome | Featherless credit | Wall time |

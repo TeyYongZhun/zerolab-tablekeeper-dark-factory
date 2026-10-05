@@ -131,6 +131,21 @@ What the room log and history show that the factory did not do well:
   pushing, the operator moved `main` to the final commit (a fast-forward, no history
   rewritten). A reviewer should check out a revision in a separate worktree, or return to the
   branch afterwards.
+- **The product-quality requirements never became work items, so the UI is plain.** The
+  stage-2 dispatch carries a "Product and visual direction" section: a coherent,
+  presentation-ready restaurant product, a consistent visual system for typography, spacing
+  and colour, seven states that must be visually distinct, and the required flows usable at a
+  375 CSS-pixel viewport without horizontal scrolling. `stage-2/DESIGN.md` mentions none of
+  it. The handoff carried the specification in full, as the mandates require, but the design
+  step turned only the testable requirements into work items; the Developer built to that
+  surface; and QA, whose review is built around running things, had no check that could fail.
+  The result satisfies every `data-testid` and behavioural rule and few of the visual ones:
+  no media queries, no overflow handling on the availability grid, and no styling for the
+  `selected`, `loading` and `refused` states. **A verification loop only catches what it can
+  run.** Requirements written as prose pass straight through a factory that reviews by
+  execution, and no seat here owned reading them. Keeping `DESIGN.md` short bought turn time
+  and cost exactly this; a generic mandate could set a presentation bar and require the
+  reviewer to check it by eye, without naming anything track-specific.
 - **Developer wrote all application code.** That is the design: Architect plans and
   coordinates, QA verifies. Work is shared by role, not by splitting the code.
 
