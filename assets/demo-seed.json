@@ -1,0 +1,91 @@
+{
+  "users": [
+    { "id": "u_tey", "email": "tey@zerolab.dev", "password": "zerolab123", "display_name": "Tey Yong Zhun" },
+    { "id": "u_mira", "email": "mira@example.com", "password": "zerolab123", "display_name": "Mira Hassan" }
+  ],
+  "restaurants": [
+    {
+      "id": "r_aurora",
+      "name": "Aurora Bistro",
+      "timezone": "Europe/Berlin",
+      "slot_minutes": 30,
+      "reservation_duration_minutes": 90,
+      "cancellation_cutoff_minutes": 120,
+      "manager_user_ids": ["u_tey"],
+      "opening_hours": [
+        { "weekday": "mon", "opens": "17:00", "closes": "23:00" },
+        { "weekday": "tue", "opens": "17:00", "closes": "23:00" },
+        { "weekday": "wed", "opens": "17:00", "closes": "23:00" },
+        { "weekday": "thu", "opens": "17:00", "closes": "23:00" },
+        { "weekday": "fri", "opens": "17:00", "closes": "23:30" },
+        { "weekday": "sat", "opens": "12:00", "closes": "23:30" },
+        { "weekday": "sun", "opens": "12:00", "closes": "22:00" }
+      ],
+      "tables": [
+        { "id": "t_a1", "label": "A1", "capacity": 2 },
+        { "id": "t_a2", "label": "A2", "capacity": 2 },
+        { "id": "t_b1", "label": "B1", "capacity": 4 },
+        { "id": "t_b2", "label": "B2", "capacity": 4 },
+        { "id": "t_c1", "label": "C1", "capacity": 6 },
+        { "id": "t_c2", "label": "C2", "capacity": 8 }
+      ],
+      "combinable": [["t_a1", "t_a2"]]
+    },
+    {
+      "id": "r_kopi",
+      "name": "Kopi & Co",
+      "timezone": "Asia/Kuala_Lumpur",
+      "slot_minutes": 30,
+      "reservation_duration_minutes": 60,
+      "cancellation_cutoff_minutes": 60,
+      "manager_user_ids": ["u_tey"],
+      "opening_hours": [
+        { "weekday": "mon", "opens": "11:00", "closes": "22:00" },
+        { "weekday": "tue", "opens": "11:00", "closes": "22:00" },
+        { "weekday": "wed", "opens": "11:00", "closes": "22:00" },
+        { "weekday": "thu", "opens": "11:00", "closes": "22:00" },
+        { "weekday": "fri", "opens": "11:00", "closes": "23:00" },
+        { "weekday": "sat", "opens": "09:00", "closes": "23:00" },
+        { "weekday": "sun", "opens": "09:00", "closes": "21:00" }
+      ],
+      "tables": [
+        { "id": "t_k1", "label": "K1", "capacity": 2 },
+        { "id": "t_k2", "label": "K2", "capacity": 4 },
+        { "id": "t_k3", "label": "K3", "capacity": 4 },
+        { "id": "t_k4", "label": "K4", "capacity": 6 }
+      ]
+    }
+  ],
+  "reservations": [
+    {
+      "id": "res_1",
+      "reference": "AURORA01",
+      "user_id": "u_tey",
+      "restaurant_id": "r_aurora",
+      "table_id": "t_b1",
+      "party_size": 4,
+      "status": "confirmed",
+      "starts_at_local": "2026-10-08T19:00"
+    },
+    {
+      "id": "res_2",
+      "reference": "AURORA02",
+      "user_id": "u_mira",
+      "restaurant_id": "r_aurora",
+      "table_id": "t_c1",
+      "party_size": 6,
+      "status": "confirmed",
+      "starts_at_local": "2026-10-08T19:30"
+    },
+    {
+      "id": "res_3",
+      "reference": "KOPI0001",
+      "user_id": "u_tey",
+      "restaurant_id": "r_kopi",
+      "table_id": "t_k2",
+      "party_size": 3,
+      "status": "confirmed",
+      "starts_at_local": "2026-10-09T12:30"
+    }
+  ]
+}

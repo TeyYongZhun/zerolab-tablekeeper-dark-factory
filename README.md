@@ -40,7 +40,23 @@ docker build -t tablekeeper .
 docker run --rm -e PORT=8080 -p 8080:8080 tablekeeper
 ```
 
+The service starts with an empty database — that is correct, because the graded checks seed
+their own fixtures. To get a populated UI, seed it:
+
+```sh
+bash assets/seed-demo.sh            # defaults to http://localhost:8080
+```
+
 Then open <http://localhost:8080> for the browser UI (from stage 2 on), or call the JSON API.
+
+**Login:** `tey@zerolab.dev` / `zerolab123` · **reservation reference:** `AURORA01`
+
+Try **Aurora Bistro**, `2026-10-08`, party size 2. Aurora has a combinable table pair, so the
+results grid offers a combined option that no single table can seat. Looking up `AURORA01`
+while signed out is refused, and succeeds once you log in.
+
+The seed script posts to the service's own `POST /_test/reset` fixture endpoint — the same hook
+the event harness uses. No application code is involved.
 
 ## Results in brief
 
