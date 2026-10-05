@@ -4,8 +4,10 @@ Our entry for the [WeAreDevelopers x BAND Dark Factory hackathon](https://lablab
 
 - **Team:** ZeroLab by Tey Yong Zhun
 - **Track:** `tablekeeper`, a restaurant reservation system
-- **Stage reached:** 4 of 4. A final `harness run --all --mode isolated` reports every folder
-  claiming its own stage on the shipped checks.
+- **Stage reached:** 4 of 4. Verified against a fresh clone of this repository:
+  `harness check` passes gates 1, 2 and the mandate part of gate 4, and
+  `harness run --all --mode isolated` reports every folder claiming its own stage on the
+  shipped checks.
 
 A three-seat band in Band Desktop built this service one stage at a time. The human sent one
 task per stage and nothing else; every line under `stage-N/` came out of the room.
@@ -20,6 +22,7 @@ task per stage and nothing else; every line under `stage-N/` came out of the roo
 | [`stage-1/`](stage-1/) … [`stage-4/`](stage-4/) | The service after each stage. Each folder is a complete service (Go, `Dockerfile`, `RUN.md`) carried forward from the one before |
 | [`dispatch/`](dispatch/) | The exact task sent to the band for each stage, plus the toy rehearsal |
 | [`agents/`](agents/) | The runner for the two OpenCode seats (`seat.py`, `architect.py`, `qa_lead.py`) |
+| [`assets/`](assets/) | Demo fixtures and the seed script used for the screenshots and the video |
 | [`SETUP.md`](SETUP.md) | Step-by-step setup to stand the factory up again |
 
 ## The band
